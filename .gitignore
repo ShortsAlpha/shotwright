@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.next/
+out/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# Secrets — never commit these (the repo is public)
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key
+
+# Captures and rendered assets (large, regenerated per run)
+captures/
+renders/
+*.mov
+*.mp4
+
+# Xcode
+DerivedData/
+*.xcresult
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.log
