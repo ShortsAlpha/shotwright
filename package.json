@@ -1,0 +1,24 @@
+{
+  "name": "shotwright",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI agent that drives your iOS app in the Simulator and produces App Store screenshots and videos",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": "24.x"
+  },
+  "packageManager": "npm@11.12.1",
+  "scripts": {
+    "dev": "npm run dev -w @shotwright/web",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "agent": "npm run dev -w @shotwright/agent --"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@shotwright/agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shotwright Mac agent: builds, drives and captures your app in the iOS Simulator",
+  "type": "module",
+  "bin": {
+    "shotwright-agent": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}
