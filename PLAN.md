@@ -65,7 +65,7 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 
 | Date | Work |
 |---|---|
-| Oct 27 | Spikes: simctl (locale, status bar, screenshot, video), Duo display switching (`--display`, `screenConfig power`), UI driver (idb vs WebDriverAgent), first Muse call on a screenshot, Spark 1.3 vs Wonder. Monorepo skeleton. |
+| Oct 26–27 | ✅ Spikes ([simulator](docs/spikes/simulator.md), [Muse API](docs/spikes/muse-api.md)): locale, status bar, alpha, video, Duo displays, own XCUITest runner, first Muse call. Monorepo skeleton. Still open: manual Duo unfold handoff, Spark 1.3 vs Wonder. |
 | Oct 28 | Mac agent ↔ web over WebSocket, pairing code, live simulator view |
 | Oct 29 | Exploration agent → recorded flow (JSON) |
 | Oct 30 | Replay across devices × locales, step repair |
@@ -81,7 +81,7 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 |---|---|
 | 0:00 | The problem: 4 sets × 10 screenshots × 40 locales, Duo mandatory in April 2027 |
 | 0:20 | Connect the Mac; the agent explores the app live and explains its picks |
-| 1:10 | Replay across devices and locales (time-lapse), Duo fold |
+| 1:10 | Replay across devices and locales (time-lapse), Duo outer and inner sets |
 | 1:50 | Output: screenshots, preview, header/search video; edit a caption, re-render |
 | 2:30 | One-click upload to App Store Connect |
 | 2:50 | What was built during the hackathon, which Meta models do what |
@@ -99,8 +99,11 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | Risk | Mitigation |
 |---|---|
 | 8 GB RAM Mac | One simulator at a time; render on the server |
-| idb maintenance | Day-1 spike; fall back to WebDriverAgent |
+| UI driver | Resolved: our own XCUITest runner (`ios/ShotwrightRunner`), no idb or WebDriverAgent. Needs per-request timeouts and restart on hang. |
 | Login walls, paywalls, empty states | Demo launch argument, test account, deep links |
-| Duo display switching unknown | Day-1 spike |
+| Duo inner display: no programmatic unfold | Automate the outer set; developer unfolds once by hand, pipeline captures `--display=3`. Don't promise an automated fold in the demo. |
+| Apps with their own language setting ignore `-AppleLanguages` | Reinstall per locale or use the app's own launch argument |
+| No accessibility identifiers in real apps | Structural selectors; Muse repair as fallback |
+| Slow launches (5–25 s) on 8 GB | Capture several screens per launch; launch once per locale |
 | Judges without a Mac | Demo mode on the site |
 | Credits drained by public site | Rate limits, cached results |
