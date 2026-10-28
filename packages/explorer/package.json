@@ -1,0 +1,22 @@
+{
+  "name": "@shotwright/explorer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Model-agnostic exploration agent: drives an iOS app through a DeviceDriver, picks marketable screens, records and replays the flow",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "cli": "node scripts/cli.ts"
+  },
+  "dependencies": {
+    "@shotwright/core": "*",
+    "@shotwright/muse": "*",
+    "sharp": "^0.35.5"
+  }
+}
