@@ -46,7 +46,7 @@ export interface EnsureRunnerOptions {
 
 export interface RunnerHandle {
   readonly driver: RunnerDriver;
-  /** Screen size in points (440 x 956 on the iPhone 6.9" simulator). */
+  /** Screen size in points (402 x 874 on the iPhone 6.3" simulator). */
   readonly screen: ScreenInfo;
   readonly process: RunnerProcess;
   /** Shuts the runner down (POST /shutdown, then kills xcodebuild if needed). */

@@ -53,7 +53,7 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 
 | Set | Size (portrait) |
 |---|---|
-| iPhone 6.9" | 1320 × 2868 |
+| iPhone 6.3" (Apple's required iPhone set) | 1206 × 2622 |
 | iPad 13" | 2064 × 2752 |
 | iPhone Duo outer | 1398 × 2034 |
 | iPhone Duo inner | 2007 × 2853 (mandatory from April 2027, iOS 27.1 SDK) |

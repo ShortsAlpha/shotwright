@@ -43,8 +43,14 @@ export interface JudgeOptions {
   readonly appDescription?: string;
   readonly client?: MuseClient;
   readonly model?: string;
-  /** Width of the images sent, in pixels. Default 440 (point size on the iPhone 6.9"). */
+  /** Width of the images sent, in pixels; the height follows the screenshot's aspect ratio. Default 402 (point width of the iPhone 6.3"). */
   readonly imageWidth?: number;
+}
+
+/** Width and height from a PNG's IHDR chunk. */
+function pngSize(png: Uint8Array): { width: number; height: number } {
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
 }
 
 const SCHEMA = {
@@ -73,7 +79,7 @@ const SCHEMA = {
 export async function judgeScreens(options: JudgeOptions): Promise<JudgeResult> {
   const client = options.client ?? basetenClient();
   const model = options.model ?? SPARK_OPEN_MODEL;
-  const width = options.imageWidth ?? 440;
+  const width = options.imageWidth ?? 402;
   const content: ChatContentPart[] = [
     {
       type: "text",
@@ -87,7 +93,8 @@ export async function judgeScreens(options: JudgeOptions): Promise<JudgeResult> 
     },
   ];
   for (const screen of options.screens) {
-    const image = await downscale(screen.png, width, Math.round((width * 2868) / 1320), 75).catch(() => screen.png);
+    const size = pngSize(screen.png);
+    const image = await downscale(screen.png, width, Math.round((width * size.height) / size.width), 75).catch(() => screen.png);
     content.push({ type: "text", text: `Screen "${screen.name}"${screen.why ? ` (explorer's note: ${screen.why})` : ""}:` });
     content.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${Buffer.from(image).toString("base64")}` } });
   }

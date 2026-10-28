@@ -4,7 +4,7 @@
  * - A compact accessibility list: one line per useful visible element, with a short ref
  *   (e1, e2, ...) the model uses in tool calls, the element's type, label, identifier and centre
  *   on a 0-1000 grid (the grid Muse uses for visual grounding).
- * - The screenshot downscaled to point size (440 x 956 on the iPhone 6.9"), as JPEG.
+ * - The screenshot downscaled to point size (402 x 874 on the iPhone 6.3"), as JPEG.
  *
  * Also computes a structural fingerprint (to recognise screens again) and a locale-independent
  * structure signature (to verify replays in other languages).
@@ -184,7 +184,7 @@ export interface ObserveOptions {
   readonly bundleId: string;
   readonly screen: ScreenInfo;
   readonly index: number;
-  /** Model image width relative to the point size. Default 1 (440 px wide on the iPhone 6.9"). */
+  /** Model image width relative to the point size. Default 1 (402 px wide on the iPhone 6.3"). */
   readonly imageScale?: number;
   readonly jpegQuality?: number;
 }

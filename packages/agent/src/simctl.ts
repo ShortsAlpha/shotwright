@@ -3,7 +3,7 @@ import { CommandError, run } from "./exec.ts";
 
 /** Simulators created for Shotwright, by name, and the screenshot set each one produces. */
 export const SHOTWRIGHT_DEVICES: Readonly<Record<string, ScreenshotSetId>> = {
-  "Shotwright iPhone 6.9": "iphone-6.9",
+  "Shotwright iPhone 6.3": "iphone-6.3",
   "Shotwright iPad 13": "ipad-13",
   "Shotwright iPhone Duo": "iphone-duo-outer",
 };

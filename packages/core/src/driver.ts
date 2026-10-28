@@ -5,7 +5,7 @@
  * - on the Mac, the agent talks to ShotwrightRunner over HTTP (ios/ShotwrightRunner/README.md);
  * - on the server, each call is forwarded to a paired Mac agent over WebSocket (protocol.ts).
  *
- * Coordinates are in points, origin top-left (440 x 956 on the iPhone 6.9" simulator);
+ * Coordinates are in points, origin top-left (402 x 874 on the iPhone 6.3" simulator);
  * screenshots are native pixels (3x).
  */
 import type { ElementSelector } from "./flow.ts";

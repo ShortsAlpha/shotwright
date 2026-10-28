@@ -21,7 +21,7 @@ export type MediaKind = "image" | "video";
 // --- Screenshot sets ---------------------------------------------------------
 
 export type ScreenshotSetId =
-  | "iphone-6.9"
+  | "iphone-6.3"
   | "ipad-13"
   | "iphone-duo-outer"
   | "iphone-duo-inner";
@@ -38,11 +38,12 @@ export interface ScreenshotSetSpec {
 }
 
 export const SCREENSHOT_SETS = {
-  "iphone-6.9": {
-    id: "iphone-6.9",
-    label: 'iPhone 6.9"',
+  "iphone-6.3": {
+    id: "iphone-6.3",
+    label: 'iPhone 6.3"',
     family: "iphone",
-    portrait: { width: 1320, height: 2868 },
+    portrait: { width: 1206, height: 2622 },
+    note: "Apple's required iPhone set (Dynamic Island, medium display); captured on an iPhone 17 Pro simulator",
   },
   "ipad-13": {
     id: "ipad-13",
