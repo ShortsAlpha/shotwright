@@ -18,12 +18,12 @@ import { RunnerProcess } from "./process.ts";
 import { bootAndWait, deviceState } from "./simctl.ts";
 
 export { RunnerDriver, DEFAULT_TIMEOUTS, findFrame } from "./driver.ts";
-export type { RunnerDriverOptions, RunnerSelector, RunnerTimeouts, StableSnapshot } from "./driver.ts";
+export type { HealthResponse, LaunchReadiness, LaunchTiming, RunnerDriverOptions, RunnerSelector, RunnerTimeouts, StableSnapshot, VisibleOptions, VisibleResult } from "./driver.ts";
 export { RunnerProcess, DEFAULT_PROJECT_DIR, xcodeVersion } from "./process.ts";
 export type { RunnerProcessOptions } from "./process.ts";
 export { RunnerError, RunnerRestartedError, RunnerStartError, RunnerTimeoutError } from "./errors.ts";
-export { layoutHash } from "./stable.ts";
-export type { SettleOptions } from "./stable.ts";
+export { contentShare, frameDiff, layoutHash, sameFrame } from "./stable.ts";
+export type { Frame, SettleOptions } from "./stable.ts";
 export * as simctl from "./simctl.ts";
 
 export interface EnsureRunnerOptions {

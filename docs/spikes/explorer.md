@@ -603,6 +603,8 @@ Expected cost in production:
    - Replay now tolerates a launch that threw while the app came up, but the time is lost.
    - The runner (packages/agent) should give the first `/source` after a launch more time, or
      find out what Renew animates on Home.
+   - **Done (Oct 28, evening):** the cause was the Mac's memory pressure plus a false hang
+     detection, not an animation; see "Capture settling and launch latency".
 2. **A structural false positive is not caught at the tap.** If the target is gone and another
    element with the same type and index sits within 15 % of the screen, replay taps it. The
    screenshot checks and screen repair catch this later, but only at the next screenshot.
@@ -614,12 +616,297 @@ Expected cost in production:
 5. **A missing anchor costs its full `waitFor` timeout (10 s)** before the screenshot step
    repairs.
 6. **Repairs are not written back.** `RepairRecord.chosen` has the working selector per locale;
-   patching the flow (or a per-locale overlay) is a follow-up.
+   patching the flow (or a per-locale overlay) is a follow-up. **Done:** `flow.repaired.json`
+   (see "Capture settling and launch latency").
 7. **`expect.ids` on other device classes.** "Must be visible" can fail when a smaller or
    different layout pushes an id off screen. That spends a repair, then fails verification.
    Not tested on iPad yet.
 8. **Mirroring assumes the app mirrors.** Coordinate-only taps on content that does not mirror
    (charts, images) land on the wrong side in Arabic and rely on screen repair.
+
+## Capture settling and launch latency (Oct 28, evening)
+
+Simulator "Shotwright iPhone 6.3" (iPhone 17 Pro, iOS 27.0, 402×874 pt). Renew rebuilt from the
+scratchpad copy with `ENABLE_DEBUG_DYLIB=NO` (see "Launch latency"). The Mac was under heavy
+memory pressure all evening (about 60 MB free, 6 GB in the compressor, Time Machine and
+CacheDelete running, load average 2–17), so launch times vary by 3x between runs; the launch
+comparisons below are interleaved A/B runs for that reason.
+
+### Summary
+
+| Question | Result |
+|---|---|
+| Why was "all-subscriptions" blurred in spark-63? | **A leftover scroll offset, plus a capture taken too early.** The flow reached it with "relaunch, tap All, swipe up 0.5". The swipe was the model's turn 14 ("reveal more subscriptions"); it wandered 11 more turns and marked the screen at turn 26 after coming back to the Home tab, which had kept the offset. At that offset the large title is collapsed and the Adobe and Disney+ rows sit under the status bar and navigation bar, blurred by the iOS 26 scroll-edge effect. The exploration's PNG and all five replays are pixel-identical in that area, so it was not timing. The timing part: every capture was taken about 0.2 s after the swipe (the tree was already stable), with the **scroll indicator still visible**. A settled capture of the same flow differs in 1.07 % of pixels, all along the right edge. It was not the title animation: every frame had the inline title fully collapsed. |
+| Fix | **Capture settling** before every mark and every replay screenshot: a stable tree, then two near-identical screenshots, with a 4 s cap. **List roots go back to the top**: before a mark, a navigation root that an earlier action left scrolled is scrolled to the top (recorded as a new `scrollToTop` flow step). A swipe right before the mark is treated as deliberate and kept. Screens recorded at the top carry `expect.atTop`, and replay scrolls them back if needed. |
+| Result on Renew | New Spark 1.3 exploration (25 turns, $0.056, 7 screens). It ran into the same situation as spark-63 (swipe on the All list, five detours, then the mark) and scrolled back via the status bar first. **Replay en/de/ja/ar/tr: 35/35 verified, 41–45 s per locale**, 6 taps by id and 4 by structure per locale, 0 repairs, $0. Every capture settled on the first pair (0.40–0.49 s), and the cap was never hit. All 35 screenshots are clean: no blur, no scroll indicator, large titles. |
+| Slow first `/source` after launch | **Not the runner.** Renew stays blank for 4–25 s on this Mac: dyld is page-faulting under memory pressure, then XCTest has to attach to the new process. The first snapshot answers 0.1–0.7 s after the content is visible. The 30–55 s launches and the restarts came from the driver: `/health` was queued behind the blocked `/source`, so after a 30 s timeout and 15 s of silence the driver declared the runner hung and restarted it. |
+| Launch fix | `/health` is now answered while the runner is busy (`busy: {route, ms}`), so a busy runner is waited for, not restarted. Launch readiness is now "source-first": `/source` at once, then a stable non-blank picture (new `/frame` route) and one more equal layout, instead of a fixed 1.5 s layout window. **First observation after the content is visible: median 3.4 → 2.6 s (5 rounds) and 3.0 → 2.1 s (4 rounds).** Well inside the 5 s target. |
+| `index` mismatch | `RunnerDriver` no longer forwards a flow selector's `index` or `frame`. The runner's own `index` (n-th match) is `RunnerSelector.nth`. Documented in the driver, the flow schema and the runner README. |
+| API for the web app | `onStep` and `signal` on `explore()` and `replayFlow()`. `reasoning`, `usage`, `ms` and `costUsd` on the `turn` event. `repair: { provider: "spark" \| "open" }` works alone (references and `flow.repaired.json` come from the run directory). All tested on the device (below). |
+| Meta Model API spend | **$0.165** of $2: two explorations ($0.109 + $0.056). Repairs ran on Spark Open (Baseten, $0). |
+
+### Cause, in the run data
+
+```
+spark-63 flow, last screen:      16 launch  17 tap "All"  18 swipe up 0.5  19 waitFor #icloud.fill  20 screenshot all-subscriptions
+exploration log:   turn 14 swipe up ("Reveal more subscriptions in All list")
+                   turns 15-25: Add -> paywall -> Hulu detail -> back -> Insights -> ... -> Home tab
+                   turn 26 mark_screen all-subscriptions          (the Home tab kept the 0.5-screen offset)
+verification:      the shortcut failed (hidden state), the literal path kept turn 14's swipe
+```
+
+- Old capture versus settled capture of the same flow (en, `runs/spark-63/replay` versus
+  `replay-settle-old`): 5 screens are identical. all-subscriptions differs by mean 0.40 levels
+  and 1.07 % of pixels, in rows 81–188 of a 209-row thumbnail at the right edge: the scroll
+  indicator. Side by side: `probe3/allsub-old-vs-settled.jpg`.
+- In the same replay, renewal-calendar needed 4 screenshots (3.4 s) before two matched, right
+  after the tab switch. Both old and settled PNGs ended up identical, so the old capture was
+  lucky there.
+
+### Capture settling (`packages/explorer/src/capture.ts`)
+
+`settleCapture(driver, { bundleId, log, signal }, { timeoutMs = 4000, intervalMs = 120, maxMeanDiff = 0.6, maxChangedShare = 0.002 })`:
+
+1. stable tree (`stableSource`: two equal layouts);
+2. screenshots until two consecutive ones match. They are compared as 96-px-wide grey
+   thumbnails: mean absolute difference ≤ 0.6 levels, and at most 0.2 % of pixels changed by
+   more than 12 levels. A blinking caret or a tiny spinner passes; a title collapse, a
+   cross-fade or a scroll indicator does not;
+3. if the picture moved, the tree is checked again with a fresh snapshot (bypassing the
+   driver's 1-s cache);
+4. at the cap: `capture "<name>": the picture did not settle within 4000 ms (last change: mean
+   X, Y % of pixels); using the last frame`.
+
+- Where it runs: explore's marks (the marked PNG is the settled one, taken right before the
+  mark) and every replay screenshot step, including explore's verification replay.
+- It needs only `source()` and `screenshot()`, so the server-side explorer gets the same
+  behaviour over the WebSocket driver (at the cost of two screenshot transfers per capture).
+- Cost: 0.40–0.49 s per capture when nothing moves (two screenshots), up to the cap otherwise.
+- Off with `settle: false`, or `--no-settle` in the CLI.
+
+### List roots back to the top (`scroll.ts`, `explore.ts`, `replay.ts`)
+
+**Detection** (`listScrollState(nodes, screen)`), from the tree alone:
+- the navigation bar at the top; a navigation root has no `BackButton` in it;
+- the main scroll container: the largest collectionView / table / scrollView / webView
+  covering at least half the screen;
+- scrolled: any of its cells, texts, buttons or images sits above the navigation bar's bottom
+  edge.
+
+On Renew's Home:
+- at launch: bar 62–168 with the large title, first cell at 168;
+- after the swipe: bar 62–116, first cell at −6;
+- after the status-bar tap: bar 62–222 (large title plus the search field), first cell at 222.
+
+**Scrolling** (`scrollToTop`):
+1. A tap on the status bar, left of the Dynamic Island: UIKit's scroll-to-top. Works on Renew,
+   3.4–3.5 s including settling.
+2. If the list is still scrolled: up to 6 momentum-free drags, each no longer than the visible
+   offset plus 8 pt, so pull-to-refresh is never triggered by overshooting.
+
+**Exploration rule** (before a mark):
+- Applies to a navigation root left scrolled when the last action was not a vertical swipe.
+- Capture the scrolled screen first, then scroll to the top and observe.
+- If the top is already marked (same state, or the same cluster): the scrolled content is the
+  point, so the mark keeps the scrolled position and capture. Exploration 1 showed why: the
+  model came back to a scrolled Insights tab to mark "insights-savings" (forecast and savings
+  cards). Without this check the scroll made it a duplicate of "insights-spend", and the screen
+  was lost.
+- Otherwise the top is marked.
+- Either way, the transition is recorded as a `{ "action": "scrollToTop" }` step, and the model
+  gets a note plus the new observation. An action in the same turn is not executed, because
+  its element refs are stale.
+
+**Replay:**
+- The `scrollToTop` step runs the same function.
+- Screenshot steps with `expect.atTop` that find their list scrolled are scrolled back first
+  (`ReplayShot.scrolledToTop`). This catches offsets left by scroll-into-view swipes or by tabs.
+
+**Schema** (`flow.ts`, still `version: 1`, old flows parse unchanged):
+- new step `ScrollToTopStep`;
+- `ExpectedScreen.atTop?: boolean`.
+
+### Shorter literal paths (`recorder.ts`)
+
+Exploration 1 rebuilt all-subscriptions from its literal path after the shortcut failed
+verification (hidden "All" filter state). The path had 10 actions: All, Add, close paywall,
+Calendar, a day, Done, next month, Insights, swipe, Home.
+
+Loops were cut only when the exact same fingerprint came back. "All list with the search field
+revealed" and "without it" are 0.85 similar, so the loop was never closed.
+
+Now:
+- `literalPath(name, "loose")` also cuts when a screen at least 0.8 similar comes back. Here
+  that gives "launch, tap All".
+- explore() tries the loose path first and falls back to the exact path if verification still
+  fails.
+- `verification.looseLiteral` records which screens use the loose path; `cli.ts rebuild`
+  honours it.
+
+### Launch latency
+
+**Measurements, old driver.** The first `/source` was sent right after `simctl launch`:
+
+| | run 1 | run 2 | run 3 | run 4 |
+|---|---|---|---|---|
+| first `/source` answered (time spent inside the runner) | 11.2 s (10.0) | 10.9 s (10.4) | 13.2 s (12.8) | 10.5 s (10.0) |
+| layout stable | 13.6 s | 12.6 s | 16.0 s | 13.0 s |
+
+Sent 12 s after the launch, the first `/source` answered in 0.9–1.3 s. The runner was only
+waiting for the app.
+
+**Where the time goes** (os_log of testmanagerd and the runner, `sample` of the app):
+
+- **The snapshot request.** testmanagerd logs "Recorded pending request for target session with
+  pid N, timeout 60.0". Then:
+  - 5.0 s until the app registers ("Creating target bootstrap session");
+  - 2.6 s to "Got main window";
+  - 1.8 s to "Capturing hierarchy".
+  There is no idle or quiescence wait on snapshots: "Wait for … to idle" only appears before
+  synthesized taps, and lasts 0.05–0.07 s.
+- **The app.** It shows a blank white screen until 6–7.5 s, then the empty state ("No
+  subscriptions yet"), then the data at 7.3–9 s. Screenshot sequence: `probe3/seq-strip*.jpg`.
+- **Why it is blank.** `sample` at 2.5–3 s shows the main thread still in dyld, at 6–36 % CPU:
+  page faults. With the default Debug build the time is in `__debug_blank_executor_main` →
+  `dlsym` into the 20 MB `Renew.debug.dylib`. With `ENABLE_DEBUG_DYLIB=NO` it is in initializers,
+  and the app was still blank until ~6 s, so there was no clear gain. Not adopted as a pipeline
+  default (it would be a change to `app.build` in packages/agent).
+- **The 30–55 s launches and restarts.** The old runner answered `/health` on the main-thread
+  queue too. While the first `/source` waited for a slow app:
+  1. the driver's `/source` timed out after 30 s;
+  2. `/health` stayed silent for the 15 s hang check;
+  3. the driver restarted the runner (5–40 s);
+  4. the retried `/source` waited for the app again.
+  Under heavy load this evening, a first `/source` took up to 38.6 s.
+
+**Tried:**
+
+| Idea | Outcome |
+|---|---|
+| Snapshot with a shorter idle timeout | Not applicable: snapshots don't wait for idle on Xcode 27.1. The only knob is the private AX messaging timeout (60 s), which would just make the call fail sooner while the app is still loading. |
+| Poll `XCUIApplication(bundleIdentifier:).state` before the first snapshot | Added as `GET /state` (and in `/frame`). It is cheap but not a readiness signal: an app is `foreground` from its first, blank frame, and right after `simctl launch` it can still report `notRunning`. |
+| `simctl launch`, attach only once the app is visible ("frames-first") | Implemented as `launchReadiness: "frames-first"`. The first `/source` then took 2.3–5.4 s *after* the picture was stable, because XCTest's attach starts only then. Not faster than asking at once (3 interleaved rounds: 16–26 s versus 13–19 s for the old rule). Kept as an option. |
+| Disable animations via a launch environment | Renew has no such argument, and UIKit has no environment switch. Not pursued: the time is spent before the first frame. |
+| `ENABLE_DEBUG_DYLIB=NO` | See above: no clear gain on this machine. |
+
+**Kept:**
+
+1. **Busy-aware `/health`** (`RunnerTests.swift`). While a request holds the main thread,
+   `/health` is answered from the HTTP queue in 3–19 ms, from cached values, with
+   `busy: {route: "GET /source", ms, queued}`. On a timeout, `RunnerDriver` asks `/health`:
+   - busy: wait (up to `timeouts.busy`, 90 s), then retry the read. An action that finished
+     in the meantime counts as done;
+   - silent: restart, as before.
+   A frozen runner (the SIGSTOP hang test) should still be restarted, because `/health`
+   stays silent then too. Not re-tested this evening.
+2. **`GET /frame`**: a 72×156 grey thumbnail of the screen plus the app state, from
+   `XCUIScreen` (system, not accessibility), so it never waits for the app.
+3. **Source-first launch** (default `launchReadiness`). The steps:
+   1. Home, then `simctl launch`;
+   2. `/source` at once with a 90 s budget, so XCTest's attach overlaps the app's own launch;
+   3. `/frame` until the picture is non-blank and unchanged for 0.5 s;
+   4. one more `/source` with an equal layout.
+   This replaces the 1.5 s layout window. Each launch logs `launched <bundle> (source-first):
+   simctl X ms, first /source at Y ms, stable picture at Z ms, stable layout at W ms` and
+   records it in `driver.lastLaunch`.
+
+**Before and after.** Interleaved A/B on the same runner build. "Content visible" comes from
+independent `simctl io screenshot` polling: the first frame equal to the final observation's.
+
+| Rounds | Mode | First observation − content visible | Median | Launch → first observation |
+|---|---|---|---|---|
+| 5 (window 0.6 s) | layout (old rule) | 3.4, 3.7, 3.5, 2.8, 2.9 s | **3.4 s** | 6.9–16.0 s |
+| | source-first | 3.5, 3.3, 2.3, 2.2, 2.6 s | **2.6 s** | 6.7–15.0 s |
+| 4 (window 0.5 s, final) | layout (old rule) | 3.0, 3.3, 2.9, 2.9 s | **3.0 s** | 6.9–14.6 s |
+| | source-first | 2.4, 2.1, 2.2, 2.0 s | **2.1 s** | 6.1–7.8 s |
+
+In both modes the first `/source` answers 0.1–0.7 s after the content is visible. Launches
+inside the replays above: stable 9.7–12.7 s after the start of `launch()` (simctl 1.9–2.9 s of
+that, under load).
+
+### API additions (backward compatible; existing callers unchanged)
+
+`explore(options)`:
+- `onStep?: (e: ExploreStepEvent) => void`: `{ phase: "explore", step: StepLog }` after every
+  model turn (calls with outputs, usage, reasoning, model and device time, observation);
+  `{ phase: "verify", round, step: ReplayStepEvent }` during verification.
+- `signal?: AbortSignal`: the loop stops at once. An in-flight model call is abandoned; a
+  device call finishes. Verification is skipped, the flow is built from what was marked, and
+  the result has `stoppedBecause: "aborted"`.
+- `settle?: CaptureSettleOptions | false`, `scrollToTop?: boolean` (default true).
+- `turn` events now carry `reasoning?`, `usage`, `ms`, `costUsd`.
+
+`replayFlow(driver, flow, options)`:
+- `onStep?: (e: ReplayStepEvent) => void`. The event is a `ReplayStepResult` plus `total`,
+  `status` (`ok` | `miss` | `failed`), `locale` and, for screenshot steps, `shot` (PNG, checks,
+  capture).
+- `signal?: AbortSignal`: stops before the next step; `result.aborted`.
+- `repair: { provider: "spark" | "open" }` is enough:
+  - `maxCostUsd` defaults to $0.10 and `maxAttemptsPerStep` to 2;
+  - references are loaded from `<runDir>/steps/NNN.jpg` through `stepSources`, read from
+    `<runDir>/exploration.json` when its flow has the same step sequence.
+- `runDir?`: default is the nearest directory above `outDir` (up to 3 levels) with an
+  exploration.json, so the web app's `outDir: <run>/replay/<locale>` works as is.
+  `stepSources?` overrides.
+- `saveRepairs?` (default true): successful repairs are written to `<runDir>/flow.repaired.json`.
+  The original is untouched. Result: `repairedFlow`, `repairedFlowFile`, `patches`.
+  - Tap repairs keep the recorded label and take the picked element's id, type, sibling index
+    and frame. Frames are un-mirrored for right-to-left locales.
+  - A one-action screen repair inserts that action before the screenshot's `waitFor`.
+  - Patches from several locales accumulate in the file; the first per step wins.
+- `settle?: CaptureSettleOptions | false`.
+- `ReplayShot.capture` (frames, waitedMs, settled), `ReplayShot.scrolledToTop`.
+
+Runner module: see "Runner module API" below:
+- `launchReadiness`, `lastLaunch`;
+- `frame()`, `waitForVisible()`;
+- `health().busy`;
+- `RunnerSelector.nth`;
+- timeouts `frame` and `busy`.
+
+**Tested on the device** (`probe3/api-test.ts`, against yesterday's spark-63 run):
+- **abort:** abort from `onStep` at the first screenshot → `aborted: true` after 3 steps and 3
+  events;
+- **repair with only `{ provider: "open" }` and `outDir: runs/spark-63/replay-autorepair/de`**
+  on the label-only legacy flow:
+  - the run directory was found and the references loaded;
+  - 2 repairs (the trial card and "Alle"), $0 (Spark Open took 9 s and 45 s);
+  - 6/6 verified;
+  - `flow.repaired.json` written;
+- **that repaired flow, replayed in ja with no repair:** 6/6, taps by id 3, structure 2 (the two
+  patched steps), label 1.
+
+### Replay matrix (`runs/spark-settle2`, 7 screens, 28 steps, 10 taps + 1 scrollToTop), settling on, repair available (Spark 1.3, $0.10 cap)
+
+| Locale | id | structure | label | repair | fallback | failed | scrollToTop | Screens verified | Capture (per screen) | Launch | Time |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| en | 6 | 4 | 0 | 0 | 0 | 0 | status bar, 3.4 s | 7/7 | 2 frames, 0.40–0.45 s | 11.8 s | 43 s |
+| de | 6 | 4 | 0 | 0 | 0 | 0 | status bar, 3.4 s | 7/7 | 2 frames, 0.41–0.49 s | 12.7 s | 45 s |
+| ja | 6 | 4 | 0 | 0 | 0 | 0 | status bar, 3.5 s | 7/7 | 2 frames, 0.43–0.46 s | 11.6 s | 43 s |
+| ar (RTL) | 6 | 4 | 0 | 0 | 0 | 0 | status bar, 3.5 s | 7/7 | 2 frames, 0.43–0.48 s | 9.7 s | 41 s |
+| tr | 6 | 4 | 0 | 0 | 0 | 0 | status bar, 3.5 s | 7/7 | 2 frames, 0.42–0.45 s | 11.0 s | 42 s |
+
+- Contact sheet: `sheet-settle-locales.jpg`. All 35 screens are right, and none is blurred or
+  mid-scroll. all-subscriptions shows the large title, the search field, the summary card and
+  the filters in every locale, mirrored in Arabic (`probe3/allsub-settle2.jpg`).
+- Explorations:
+  - **`runs/spark-settle`** (first try): 37 turns, $0.109, 6 screens, all clean. It exposed the
+    two problems fixed above: the lost insights-savings, and the 10-action literal path.
+  - **`runs/spark-settle2`**: 25 turns, 17 actions, 7 screens, 138 s plus 43 s of verification
+    (passed in round 1).
+- Judge (Spark Open) ranking for spark-settle2: home-overview, spending-insights,
+  renewal-calendar, subscription-detail, split-cost-detail, all-subscriptions,
+  cancelled-savings.
+
+### Still open
+
+- `scrollToTop` costs 3.4 s: tap, settle, a 0.4 s pause and two fresh stable snapshots. It
+  could be trimmed.
+- The rule "a swipe right before the mark is deliberate" keeps the scroll-edge blur for screens
+  the model scrolled on purpose. That is the iOS 26 look, but a capture option to scroll to the
+  next row boundary could make those cleaner.
+- Launch time is bounded by the app and the Mac (4–25 s to first content here). Capturing
+  several screens per launch, as the flows already do, matters more than anything in the runner.
 
 ## Runner module API (for the WebSocket agent)
 
@@ -632,7 +919,7 @@ const handle = await ensureRunner({
   derivedDataPath?,         // default ~/Library/Caches/Shotwright/runner/xcode-<version>-<build>
   boot?,                    // default true: boots the simulator if it is shut down
   forceRebuild?, projectDir?, healthTimeoutMs?, // default 300 s
-  driver?: { timeouts?, settleAfterActions?, settle? },
+  driver?: { timeouts?, settleAfterActions?, settle?, launchReadiness? }, // "source-first" (default) | "frames-first" | "layout"
   log?: (message) => void,
 });
 handle.driver   // RunnerDriver implements DeviceDriver
@@ -641,21 +928,31 @@ handle.process  // RunnerProcess: restart(), stop(), healthy(), logPath, owned
 await handle.stop();        // POST /shutdown, then kills xcodebuild if needed
 ```
 
-- `RunnerDriver` covers all of `DeviceDriver`. Each call settles on its own: `launch` waits for
-  1.5 s of layout stability, and actions wait for two equal snapshots.
+- `RunnerDriver` covers all of `DeviceDriver`. Each call settles on its own: `launch` asks for
+  `/source` at once, then waits for a stable non-blank picture (`/frame`, 0.5 s) and a second,
+  equal layout (see "Capture settling and launch latency"); actions wait for two equal snapshots.
+  `driver.lastLaunch` has the timing of the last launch.
 - Extras:
   - `waitForStable({ bundleId?, timeoutMs?, minStableMs? })` returns the snapshot plus
-    `stable` and `waitedMs`;
-  - `health()`;
+    `stable`, `waitedMs` and `firstMs`;
+  - `waitForVisible({ bundleId?, timeoutMs?, minStableMs?, blankAcceptMs? })`: picture-only wait;
+  - `frame(bundleId?)`: grayscale thumbnail + app state from `GET /frame`;
+  - `health()`: while the runner is busy, `busy: { route, ms, queued }`;
   - `launchViaRunner()` uses XCUI `launch()`; avoid it right after an install.
-- On a hang the driver restarts the runner by itself. Don't recreate the driver because one call
+- Selectors: a flow selector's `index` (sibling position) and `frame` are never forwarded; the
+  runner's own `index` (n-th match of the query) is `RunnerSelector.nth`.
+- On a timeout the driver asks `/health`: a busy runner is waited for (up to `timeouts.busy`,
+  90 s), one that does not answer is restarted. Don't recreate the driver because one call
   timed out:
   - reads are retried once;
-  - actions throw `RunnerRestartedError`, after which you observe again.
-- Timeouts (ms), overridable: health 3,000, source 30,000, screenshot 10,000, tap 20,000,
-  swipe 15,000, type 30,000, home 10,000, launch 90,000, hang check 15,000.
+  - a timed-out action that finished while the driver waited counts as done;
+  - after a restart, actions throw `RunnerRestartedError`, after which you observe again.
+- Timeouts (ms), overridable: health 3,000, source 30,000 (the first `/source` after a launch:
+  90,000), screenshot 10,000, frame 10,000, tap 20,000, swipe 15,000, type 30,000, home 10,000,
+  launch 90,000, hang check 15,000, busy 90,000.
 - Also exported: `simctl` (`installApp`, `launchApp`, `terminateApp`, `bootAndWait`,
-  `listDevices`), `layoutHash`, `findFrame`, and the error classes.
+  `listDevices`), `layoutHash`, `findFrame`, `contentShare`, `frameDiff`, `sameFrame`, and the
+  error classes.
 - The explorer runs against any `DeviceDriver`. It uses `waitForStable` when the driver has it
   and otherwise polls `source()`, so the WebSocket driver needs nothing extra.
 
@@ -666,15 +963,23 @@ import { explore, replayFlow, judgeScreens, createProvider } from "@shotwright/e
 
 const result = await explore({ driver, provider: createProvider("spark", { reasoningEffort: "low" }),
   bundleId, launchArgs, appName: "Renew", hint, maxSteps: 40, maxCostUsd: 1, outDir, log,
-  onEvent }); // events: observation (with JPEG), turn, action (with the model's reason), mark (with PNG)
+  onEvent,      // observation (JPEG), turn (text, calls, reasoning?, usage, ms, costUsd), action (reason), mark (PNG)
+  onStep,       // { phase: "explore", step: StepLog } after every turn; { phase: "verify", round, step: ReplayStepEvent }
+  signal,       // AbortSignal: stops at once, skips verification, stoppedBecause "aborted"
+  settle,       // CaptureSettleOptions | false (default on: 4 s cap)
+  scrollToTop,  // default true
+});
 // result: flow, screens, ranked, notes, usage, costUsd, timing, steps, graph, verification
 
 const replay = await replayFlow(driver, result.flow, { locale: { language: "de" },
   launchArgs: ["-seedSampleData", "-inMemoryStore", "-sampleRegion", "DE"], screens: result.screens,
-  // optional model repair; referenceImage(i) = <outDir>/steps/<result.stepSources[i]>.jpg
-  repair: { provider: "spark", maxCostUsd: 0.1, maxAttemptsPerStep: 2, referenceImage } });
-// replay.screenshots[i]: { name, png, verified, checks, repaired? }
+  outDir: `${dir}/replay/de`,
+  repair: { provider: "spark" },   // or "open"; references and flow.repaired.json come from the run directory
+  runDir: dir,                     // optional: found above outDir when it has exploration.json
+  onStep, signal, settle });
+// replay.screenshots[i]: { name, png, verified, checks, repaired?, capture?, scrolledToTop? }
 // replay.steps[i].via: id | structure | label | repair | fallback | point; replay.repairs, replay.repairCostUsd
+// replay.aborted?, replay.repairedFlow?, replay.repairedFlowFile?, replay.patches?
 
 const judged = await judgeScreens({ screens: [{ name, png, why }], appName: "Renew" });
 ```
@@ -687,6 +992,8 @@ const judged = await judgeScreens({ screens: [{ name, png, why }], appName: "Ren
 - `packages/explorer/`:
   - `src/explore.ts`, `observe.ts`, `actions.ts` (selectors and step executors shared by
     exploration and replay), `tools.ts`, `recorder.ts`, `replay.ts`, `repair.ts`, `judge.ts`, `json.ts`
+  - since Oct 28 evening: `capture.ts` (capture settling), `scroll.ts` (list scroll state,
+    scroll to top), `repaired.ts` (flow.repaired.json), `abort.ts`
   - `src/providers/` (`muse-responses.ts`, `chat.ts`, `pricing.ts`, `types.ts`)
   - `scripts/cli.ts`
 - Scratchpad (not committed): `runs/{spark-v1,spark,spark-b,spark-c,wonder,open,open-json,smoke-open}/`,
@@ -698,3 +1005,10 @@ const judged = await judgeScreens({ screens: [{ name, png, why }], appName: "Ren
   - `sheet-structural-locales.jpg`, `sheet-repair-spark-locales.jpg`,
     `sheet-repair-open-locales.jpg`, `sheet-screen-repair.jpg`, `repair-reference-all.jpg`;
   - `probe2/`: tree dumps, resolver test, sheet and strip scripts.
+- Scratchpad, Oct 28 evening:
+  - `runs/spark-settle/`, `runs/spark-settle2/` (explorations; `spark-settle2/replay/` is the
+    5-locale matrix), `runs/spark-63/replay-settle-old/`, `runs/spark-63/replay-autorepair/`,
+    `runs/spark-63/flow.repaired.json`;
+  - `sheet-settle-locales.jpg`;
+  - `probe3/`: launch-latency probes (`launch-latency.ts`, `launch-ab.ts`, `launch-new.ts`),
+    `scrolltop.ts`, `api-test.ts`, os_log and `sample` output, strips.

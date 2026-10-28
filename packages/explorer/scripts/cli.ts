@@ -3,10 +3,11 @@
  *
  *   node packages/explorer/scripts/cli.ts explore --udid <UDID> --bundle <id> --model spark --out <dir> \
  *     [--app-path <App.app>] [--args "-seedSampleData -inMemoryStore"] [--app-name Renew] [--hint "..."] \
- *     [--max-steps 40] [--max-cost 1.5] [--effort low] [--judge]
+ *     [--max-steps 40] [--max-cost 1.5] [--effort low] [--judge] [--no-settle] [--no-scroll-top]
  *   node packages/explorer/scripts/cli.ts replay --udid <UDID> --exploration <dir>/exploration.json --out <dir> \
  *     [--locales en,de,ja] [--args "-seedSampleData -sampleRegion {region}"] \
- *     [--repair spark|open|none] [--repair-max-cost 0.10] [--repair-attempts 2] [--flow <flow.json>]
+ *     [--repair spark|open|none] [--repair-max-cost 0.10] [--repair-attempts 2] [--flow <flow.json>] \
+ *     [--no-settle] [--no-save-repairs]   (successful repairs go to <exploration dir>/flow.repaired.json)
  *   node packages/explorer/scripts/cli.ts judge --exploration <dir>/exploration.json [--app-name Renew]
  *   node packages/explorer/scripts/cli.ts rebuild --exploration <dir>/exploration.json   (flow from the saved graph)
  *
@@ -52,6 +53,9 @@ const { positionals, values } = parseArgs({
     "no-status-bar": { type: "boolean", default: false },
     "no-verify": { type: "boolean", default: false },
     repair: { type: "string", default: "spark" },
+    "no-settle": { type: "boolean", default: false },
+    "no-scroll-top": { type: "boolean", default: false },
+    "no-save-repairs": { type: "boolean", default: false },
     "repair-max-cost": { type: "string", default: "0.10" },
     "repair-attempts": { type: "string", default: "2" },
     flow: { type: "string" },
@@ -107,7 +111,7 @@ async function runJudge(exploration: ExplorationResult, dir: string): Promise<Ju
   return judged;
 }
 
-/** Per locale: how each tap was resolved, screens verified, repair cost. */
+/** Per locale: how each tap was resolved, screens verified, repair cost, capture settling. */
 function tally(locale: string, result: ReplayResult): Record<string, string | number> {
   const taps = { id: 0, structure: 0, label: 0, repair: 0, fallback: 0, point: 0, failed: 0 };
   for (const step of result.steps) {
@@ -121,6 +125,9 @@ function tally(locale: string, result: ReplayResult): Record<string, string | nu
     ...taps,
     screenRepairs: result.steps.filter((s) => s.action === "screenshot" && s.repair).length,
     screens: `${shots.filter((s) => s.verified).length}/${shots.length}`,
+    captureFrames: shots.map((s) => s.capture?.frames ?? 1).join("/"),
+    captureCapHit: shots.filter((s) => s.capture && !s.capture.settled).length,
+    scrolledToTop: shots.filter((s) => s.scrolledToTop).length + result.steps.filter((s) => s.action === "scrollToTop" && s.detail !== "already").length,
     seconds: Math.round(result.totalMs / 1000),
     repairUsd: Math.round(result.repairCostUsd * 10_000) / 10_000,
     repairListUsd: Math.round(result.repairs.reduce((sum, r) => sum + r.listCostUsd, 0) * 10_000) / 10_000,
@@ -156,6 +163,8 @@ async function main(): Promise<number> {
           ...(values["image-scale"] ? { imageScale: Number(values["image-scale"]) } : {}),
           outDir: out,
           verify: !values["no-verify"],
+          ...(values["no-settle"] ? { settle: false as const } : {}),
+          ...(values["no-scroll-top"] ? { scrollToTop: false } : {}),
           log,
         });
         log(
@@ -193,15 +202,7 @@ async function main(): Promise<number> {
       // Repair references: the screenshot each step was recorded on (steps/NNN.jpg).
       // A flow passed with --flow keeps the step order of the exploration's flow when it has as many steps.
       const sources = flow.steps.length === exploration.flow.steps.length ? exploration.stepSources : undefined;
-      const referenceImage = (stepIndex: number): Uint8Array | undefined => {
-        const at = sources?.[stepIndex];
-        if (at === null || at === undefined) return undefined;
-        try {
-          return new Uint8Array(readFileSync(join(dir, "steps", `${String(at).padStart(3, "0")}.jpg`)));
-        } catch {
-          return undefined;
-        }
-      };
+      // Reference images come from <dir>/steps/NNN.jpg via runDir + stepSources (replayFlow's defaults).
       const repairModel = values.repair!;
       const repair =
         repairModel === "none"
@@ -210,7 +211,6 @@ async function main(): Promise<number> {
               provider: repairModel === "open" ? ("open" as const) : ("spark" as const),
               maxCostUsd: Number(values["repair-max-cost"]),
               maxAttemptsPerStep: Number(values["repair-attempts"]),
-              referenceImage,
             };
       const runner = await ensureRunner({ udid, log });
       const summary: unknown[] = [];
@@ -230,7 +230,11 @@ async function main(): Promise<number> {
             ...(launchArgs ? { launchArgs } : {}),
             screens: exploration.screens,
             outDir: join(out, spec),
+            runDir: dir,
+            ...(sources ? { stepSources: sources } : {}),
             ...(repair ? { repair } : {}),
+            ...(values["no-settle"] ? { settle: false as const } : {}),
+            ...(values["no-save-repairs"] ? { saveRepairs: false } : {}),
             log,
           });
           const verified = result.screenshots.filter((s) => s.verified).length;
@@ -238,7 +242,9 @@ async function main(): Promise<number> {
           matrix.push(row);
           log(
             `replay ${spec}: ${result.ok ? "ok" : "FAILED"}, ${verified}/${result.screenshots.length} screenshots verified, ${(result.totalMs / 1000).toFixed(1)} s; ` +
-              `taps: ${Object.entries(row).filter(([k]) => !["locale", "screens", "seconds", "repairUsd", "repairListUsd"].includes(k)).map(([k, v]) => `${k} ${v}`).join(", ")}; repair $${result.repairCostUsd.toFixed(4)}`,
+              `taps: ${Object.entries(row).filter(([k]) => ["id", "structure", "label", "repair", "fallback", "point", "failed"].includes(k)).map(([k, v]) => `${k} ${v}`).join(", ")}; ` +
+              `capture frames ${row.captureFrames} (cap hit ${row.captureCapHit}); repair $${result.repairCostUsd.toFixed(4)}` +
+              (result.repairedFlowFile ? `; repaired flow: ${result.repairedFlowFile}` : ""),
           );
           summary.push({
             locale: spec,
@@ -267,7 +273,8 @@ async function main(): Promise<number> {
       const recorder = FlowRecorder.fromJSON(exploration.graph);
       const launch = { action: "launch" as const, bundleId: exploration.app.bundleId, args: [...exploration.app.launchArgs] };
       const literal = new Set(exploration.verification?.literal ?? []);
-      const built = recorder.build(exploration.flow.name, launch, { literal });
+      const looseLiteral = new Set(exploration.verification?.looseLiteral ?? []);
+      const built = recorder.build(exploration.flow.name, launch, { literal, looseLiteral });
       const updated = { ...exploration, flow: built.flow, screens: built.screens, stepSources: built.sources };
       writeFileSync(explorationPath, JSON.stringify(updated, null, 2));
       writeFileSync(join(dirname(explorationPath), "flow.json"), JSON.stringify(built.flow, null, 2));

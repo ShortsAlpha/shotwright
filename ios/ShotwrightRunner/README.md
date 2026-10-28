@@ -57,13 +57,15 @@ points (the iPhone 17 Pro Max screen is 440 x 956 pt; screenshots are 3x).
 
 | Route | Body / query | Notes |
 |---|---|---|
-| `GET /health` | | screen size in points, current bundle id |
+| `GET /health` | | screen size in points, current bundle id. While another request holds the main thread it is answered at once from the HTTP queue with the last known values plus `busy: {route, ms, queued}` and `cached: true` |
+| `GET /state?bundleId=…` | | app state only (`foreground`, `background`, `notRunning`, …); never waits for the app |
+| `GET /frame?bundleId=…&w=72&h=156` | | grayscale thumbnail of the screen (`gray`: base64, row-major, one byte per pixel) plus the app's `state`. The picture comes from the system, not the app's accessibility tree, so it answers in ~0.2 s even while a just-launched app is loading |
 | `GET /source?bundleId=…` | | accessibility tree: `type`, `identifier`, `label`, `value`, `placeholder`, `frame {x,y,w,h}`, `enabled`, `selected`, `children`; plus `count` and app `state`. Defaults to the last launched app |
 | `GET /screenshot` | | PNG of the screen, already without alpha (1320 x 2868 on iPhone 6.9") |
 | `POST /launch` | `{bundleId, args?, env?, activate?}` | `XCUIApplication.launch()`: terminates a running instance, launches, waits until the app is idle. `activate: true` brings it to the front without relaunching |
 | `POST /terminate` | `{bundleId?}` | |
 | `POST /home` | | presses Home (use before `/launch` to avoid the "◀ App" back-link in the status bar) |
-| `POST /tap` | `{x, y}` or `{identifier}` or `{label}` (+ `type`, `index`, `bundleId`, `timeout`, `query`) | coordinate taps go through SpringBoard, so they hit whatever app is in front. `identifier`/`label` taps find the element in one snapshot and tap its centre (about 0.7 s); if it is not on screen, or with `query: true`, they fall back to an XCUI query + `tap()` (2–10 s), which also scrolls it into view |
+| `POST /tap` | `{x, y}` or `{identifier}` or `{label}` (+ `type`, `index`, `bundleId`, `timeout`, `query`) | coordinate taps go through SpringBoard, so they hit whatever app is in front. `identifier`/`label` taps find the element in one snapshot and tap its centre (about 0.7 s); if it is not on screen, or with `query: true`, they fall back to an XCUI query + `tap()` (2–10 s), which also scrolls it into view. **`index` here is the n-th match of the whole query** (0-based), not the flow schema's `index` (position among same-type siblings): `RunnerDriver` never forwards a flow selector's `index` or `frame`; its `RunnerSelector.nth` maps to this field |
 | `POST /swipe` | `{x1, y1, x2, y2, duration?, hold?}` or `{direction, identifier?/label?}` | `hold > 0` stops momentum at the end |
 | `POST /type` | `{text}` (+ optional element selector, which is tapped first) | fails fast if nothing has keyboard focus |
 | `POST /shutdown` | | ends the test |
@@ -88,14 +90,18 @@ curl -s localhost:8615/screenshot -o shot.png
 - XCUI interaction failures are captured in `record(_:)` and returned as `{"ok":false,"error":…}`
   (HTTP 500). They are deliberately not forwarded to XCTest, because XCTest would otherwise end
   the test on the first failed interaction, even with `continueAfterFailure = true`.
-- Requests run one at a time. A slow XCUI call (launch waits for the app to go idle) blocks the
-  queue, so the agent should use per-call timeouts and restart the runner if `/health` stops
-  answering.
+- Requests run one at a time. A slow XCUI call (launch waits for the app to go idle; the first
+  `/source` after `simctl launch` waits until XCTest has attached to the new process and the app
+  answers accessibility requests, 1-60 s depending on the app and the Mac's load) blocks the
+  queue. `/health` is still answered while that happens, with `busy: {route, ms, queued}`, so
+  the agent can tell a busy runner from a hung one: `RunnerDriver` waits for a busy runner (up to
+  90 s) and restarts only one that stops answering `/health` altogether.
 - After `simctl install`, SpringBoard can take a moment to register the app. A `/launch` sent
   immediately can fail with "Unknown application display identifier". XCTest then retries
   internally and the runner stayed blocked for more than 4 minutes (until killed). Prefer
   `xcrun simctl launch` (fails in under a second) and use the runner only once the app is up:
-  the first `/source` for the app waits until it is idle, then poll until the tree is stable.
+  the first `/source` for the app waits until it can answer, then confirm with a stable,
+  non-blank `/frame` and a second, equal `/source` (what `RunnerDriver.launch()` does).
 - The tree is a snapshot. While a push animation runs it still contains the previous screen
   (frames with negative x). Before acting, poll `/source` until two consecutive snapshots
   match. Sort JSON keys before hashing, because key order is not stable.

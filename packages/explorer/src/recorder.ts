@@ -7,10 +7,10 @@
  * fresh launch when that is shorter. Before each screenshot a `waitFor` on an identifier that
  * only the target screen has makes the flow verify itself on replay.
  */
-import { FlowSchema, type ExpectedScreen, type Flow, type FlowStep, type LaunchStep, type SwipeStep, type TapStep, type TypeTextStep } from "@shotwright/core";
+import { FlowSchema, type ExpectedScreen, type Flow, type FlowStep, type LaunchStep, type ScrollToTopStep, type SwipeStep, type TapStep, type TypeTextStep } from "@shotwright/core";
 import type { Observation } from "./observe.ts";
 
-type ActionStep = TapStep | SwipeStep | TypeTextStep;
+export type ActionStep = TapStep | SwipeStep | TypeTextStep | ScrollToTopStep;
 
 export interface StateInfo {
   readonly fingerprint: string;
@@ -22,6 +22,8 @@ export interface StateInfo {
   readonly lines: readonly string[];
   readonly title: string | undefined;
   readonly observationIndex: number;
+  /** A navigation root whose main list was at its top (replay scrolls it back there before the screenshot). */
+  readonly atTop?: boolean;
 }
 
 export interface MarkedScreen {
@@ -71,11 +73,18 @@ function stepCost(step: ActionStep): number {
       return 1.1;
     case "typeText":
       return 1.2;
+    case "scrollToTop":
+      return 0.5;
   }
 }
 
 /** Screens whose element lines overlap this much are treated as one node when finding paths. */
 export const SAME_SCREEN_SIMILARITY = 0.9;
+/**
+ * Loose literal paths cut a detour when a screen at least this similar comes back (e.g. a list
+ * with and without its search field revealed: 0.85 on Renew's Home). Verified on replay.
+ */
+export const LOOSE_LITERAL_SIMILARITY = 0.8;
 
 function lineSimilarity(a: readonly string[], b: readonly string[]): number {
   const A = new Set(a);
@@ -108,6 +117,13 @@ export interface BuildOptions {
    * tab remembers, say).
    */
   readonly literal?: ReadonlySet<string>;
+  /**
+   * Screens of `literal` whose literal path cuts loops loosely: not only when the very same state
+   * comes back, but also a near-identical screen (LOOSE_LITERAL_SIMILARITY). That drops
+   * detours such as "open the paywall, close it" or a visit to another tab. Shorter, but it can
+   * miss hidden state again, so explore() verifies a loose path and falls back to the exact one.
+   */
+  readonly looseLiteral?: ReadonlySet<string>;
 }
 
 export class FlowRecorder {
@@ -143,6 +159,7 @@ export class FlowRecorder {
       lines: observation.lines,
       title: observation.title,
       observationIndex: observation.index,
+      ...(observation.scroll?.root && observation.scroll.list && !observation.scroll.scrolled ? { atTop: true } : {}),
     });
   }
 
@@ -222,8 +239,17 @@ export class FlowRecorder {
     return { cost: dist.get(target)!, edges };
   }
 
-  /** Relaunch, then the actions taken since the last launch before the mark, with loops (same exact state) cut out. */
-  literalPath(name: string): { cost: number; edges: Edge[] } | undefined {
+  /** A marked screen in the same state or the same cluster as `state`. */
+  markedTwin(state: string): MarkedScreen | undefined {
+    const rep = this.clusters();
+    const cluster = rep.get(state) ?? state;
+    return this.marks.find((m) => m.state === state || (rep.get(m.state) ?? m.state) === cluster);
+  }
+
+  /** Relaunch, then the actions taken since the last launch before the mark, with loops (same exact state, or a near-identical one when loose) cut out. */
+  literalPath(name: string, mode: "exact" | "loose" = "exact"): { cost: number; edges: Edge[] } | undefined {
+    const lines = (state: string) => this.states.get(state)?.lines ?? [];
+    const same = (a: string, b: string) => a === b || (mode === "loose" && lineSimilarity(lines(a), lines(b)) >= LOOSE_LITERAL_SIMILARITY);
     const at = this.events.findIndex((e) => e.kind === "mark" && e.name === name);
     if (at < 0) return undefined;
     let start = -1;
@@ -239,7 +265,7 @@ export class FlowRecorder {
     const edges: Edge[] = [{ from: START, to: launchEvent.state, step: "launch", cost: LAUNCH_COST }];
     for (const event of this.events.slice(start + 1, at)) {
       if (event.kind !== "action") continue;
-      const seen = states.indexOf(event.to);
+      const seen = states.findIndex((s) => same(s, event.to));
       if (seen >= 0) {
         states.length = seen + 1;
         edges.length = seen + 1;
@@ -266,7 +292,7 @@ export class FlowRecorder {
     const info = this.states.get(state);
     if (!info) return undefined;
     const ids = [...new Set([...(anchor ? [anchor] : []), ...(info.viewIds ?? [])])].slice(0, 3);
-    return { ids, ...(info.title ? { title: info.title } : {}), structure: [...info.structure] };
+    return { ids, ...(info.title ? { title: info.title } : {}), structure: [...info.structure], ...(info.atTop ? { atTop: true } : {}) };
   }
 
   /**
@@ -289,7 +315,7 @@ export class FlowRecorder {
         warnings.push(`"${mark.name}" looks the same as "${twin}"; left out of the flow`);
         continue;
       }
-      const literal = options.literal?.has(mark.name) ? this.literalPath(mark.name) : undefined;
+      const literal = options.literal?.has(mark.name) ? this.literalPath(mark.name, options.looseLiteral?.has(mark.name) ? "loose" : "exact") : undefined;
       const fromCurrent = literal ? undefined : this.shortestPath(current, mark.state, rep);
       const fromStart = literal || current === START ? undefined : this.shortestPath(START, mark.state, rep);
       const path = literal ?? (fromCurrent && (!fromStart || fromCurrent.cost <= fromStart.cost) ? fromCurrent : fromStart);

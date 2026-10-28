@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import type { DeviceDriver, Rect, ScreenInfo, UINode, UISnapshot } from "@shotwright/core";
 import sharp from "sharp";
+import { listScrollState } from "./scroll.ts";
 
 export interface FlatNode {
   readonly type: string;
@@ -60,6 +61,12 @@ export interface Observation {
   readonly title: string | undefined;
   readonly keyboard: boolean;
   readonly foreground: boolean;
+  /**
+   * The main list or scroll view under a navigation bar: whether the screen is a navigation root
+   * (no back button) and whether the list is scrolled away from its top. Undefined without a
+   * navigation bar.
+   */
+  readonly scroll?: { readonly root: boolean; readonly scrolled: boolean; readonly list: boolean };
   /** Full-resolution PNG from the driver. */
   readonly png: Uint8Array;
   /** Downscaled JPEG sent to the model. */
@@ -203,10 +210,13 @@ export interface ObserveOptions {
   readonly jpegQuality?: number;
 }
 
-/** Polls `source()` until two consecutive snapshots have the same structure (or uses the driver's own wait). */
-export async function stableSource(driver: DeviceDriver, bundleId: string, timeoutMs = 10_000): Promise<UISnapshot> {
+/**
+ * Polls `source()` until two consecutive snapshots have the same structure (or uses the driver's own
+ * wait). `fresh` skips a driver-side cache of the last stable snapshot (RunnerDriver keeps one for 1 s).
+ */
+export async function stableSource(driver: DeviceDriver, bundleId: string, timeoutMs = 10_000, fresh = false): Promise<UISnapshot> {
   const withWait = driver as DeviceDriver & { waitForStable?: (o: { bundleId?: string; timeoutMs?: number }) => Promise<UISnapshot> };
-  if (typeof withWait.waitForStable === "function") return withWait.waitForStable({ timeoutMs });
+  if (typeof withWait.waitForStable === "function") return withWait.waitForStable(fresh ? { bundleId, timeoutMs } : { timeoutMs });
   const start = Date.now();
   let last = "";
   let snapshot = await driver.source(bundleId);
@@ -217,6 +227,11 @@ export async function stableSource(driver: DeviceDriver, bundleId: string, timeo
     await new Promise((r) => setTimeout(r, 300));
     snapshot = await driver.source(bundleId);
   }
+}
+
+/** Layout key of a snapshot: type, identifier, label and frame of every node. Changes when anything moves. */
+export function layoutKey(tree: UINode): string {
+  return structureHash(tree);
 }
 
 function structureHash(tree: UINode): string {
@@ -280,6 +295,7 @@ export async function buildObservation(snapshot: UISnapshot, png: Uint8Array, op
     ...identifiers.filter((id) => onView(id) && system(id)),
     ...identifiers.filter((id) => !onView(id)),
   ];
+  const scrollState = listScrollState(nodes, screen);
   const scale = options.imageScale ?? 1;
   const image = await downscale(png, screen.width * scale, screen.height * scale, options.jpegQuality);
   return {
@@ -299,6 +315,7 @@ export async function buildObservation(snapshot: UISnapshot, png: Uint8Array, op
     title,
     keyboard,
     foreground,
+    ...(scrollState ? { scroll: { root: scrollState.root, scrolled: scrollState.scrolled, list: scrollState.container !== undefined } } : {}),
     png,
     image,
   };

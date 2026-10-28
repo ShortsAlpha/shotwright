@@ -8,6 +8,7 @@
  */
 import type { DeviceDriver, ElementSelector, NormalizedPoint, NormalizedRect, Point, ScreenInfo, ScreenshotStep, TapStep } from "@shotwright/core";
 import sharp from "sharp";
+import { abortable, isAbortError } from "./abort.ts";
 import { performSwipe, selectorFor } from "./actions.ts";
 import { center, fromGrid, observe, type Observation, type ObservedElement } from "./observe.ts";
 import { createProvider } from "./providers/index.ts";
@@ -70,6 +71,8 @@ export interface RepairContext {
   readonly localeText: string;
   readonly rtl: boolean;
   readonly log: (message: string) => void;
+  /** Abandons an in-flight model call when it fires. */
+  readonly signal?: AbortSignal;
 }
 
 /** Checks the outcome after a repair action; `before` is the observation the action was chosen on. */
@@ -251,8 +254,9 @@ export class StepRepairer {
       }
       let reply: Awaited<ReturnType<ExplorerProvider["next"]>>;
       try {
-        reply = await provider.next({ instructions: INSTRUCTIONS, tools: REPAIR_TOOLS, history });
+        reply = await abortable(provider.next({ instructions: INSTRUCTIONS, tools: REPAIR_TOOLS, history }), this.#ctx.signal);
       } catch (error) {
+        if (isAbortError(error, this.#ctx.signal)) throw error;
         note = `model call failed: ${(error as Error).message.slice(0, 200)}`;
         log(`    repair step ${stepIndex}: ${note}`);
         break;

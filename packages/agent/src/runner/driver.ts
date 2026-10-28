@@ -1,14 +1,22 @@
 /**
  * RunnerDriver: DeviceDriver over ShotwrightRunner's HTTP API (ios/ShotwrightRunner/README.md).
  *
- * Readiness rules from docs/spikes/simulator.md:
+ * Readiness rules from docs/spikes/simulator.md and docs/spikes/explorer.md:
  * - launch with `simctl launch` (fails fast) after pressing Home (no "◀ App" back-link), never the
  *   runner's `/launch` right after an install;
- * - after a launch or an action, poll `/source` until two consecutive snapshots have the same layout
- *   (at least 1.5 s of stability after a launch, so a splash screen is not taken as ready);
- * - every request has its own timeout; when one times out and `/health` stops answering too, the
- *   runner is restarted (`onHang`). Idempotent reads are retried once; actions throw
- *   RunnerRestartedError so the caller observes the screen again before acting.
+ * - after a launch, first wait (with the runner's cheap `/frame` thumbnails, which never touch the
+ *   app's accessibility tree) until the app shows a non-blank picture that stays the same for 1 s,
+ *   and only then ask for `/source`. A snapshot requested while a just-launched app is still
+ *   loading blocks the runner for 10-60 s; requested once the picture is stable it takes ~1 s;
+ * - after an action, poll `/source` until two consecutive snapshots have the same layout;
+ * - every request has its own timeout. When one times out, `/health` tells "busy" from "hung": the
+ *   runner answers it from its HTTP queue with the route that holds the main thread. A busy runner
+ *   is waited for (up to `timeouts.busy`); one that does not answer at all is restarted (`onHang`).
+ *   Idempotent reads are retried once; actions throw RunnerRestartedError after a restart so the
+ *   caller observes the screen again before acting.
+ * - Selectors: the flow schema's `index` (position among same-type siblings) and `frame` are not
+ *   the runner's `index` (n-th match of the whole query), so they are never forwarded. Use
+ *   `RunnerSelector.nth` for the runner's meaning.
  */
 import type {
   DeviceDriver,
@@ -25,10 +33,14 @@ import type {
 import { RunnerError, RunnerRestartedError, RunnerTimeoutError } from "./errors.ts";
 import { RunnerHttp } from "./http.ts";
 import { launchApp, terminateApp } from "./simctl.ts";
-import { layoutHash, type SettleOptions } from "./stable.ts";
+import { contentShare, layoutHash, sameFrame, type Frame, type SettleOptions } from "./stable.ts";
 
-/** ElementSelector plus the runner's optional disambiguators. */
-export type RunnerSelector = ElementSelector & { readonly type?: string; readonly index?: number };
+/**
+ * ElementSelector plus the runner's own disambiguator. `nth` is the runner's `index`: the n-th
+ * match of the whole query (0-based). The flow schema's `index` (position among same-type
+ * siblings) and `frame` are ignored here: the runner cannot honour them.
+ */
+export type RunnerSelector = ElementSelector & { readonly nth?: number };
 
 export interface RunnerTimeouts {
   readonly health: number;
@@ -39,8 +51,14 @@ export interface RunnerTimeouts {
   readonly type: number;
   readonly home: number;
   readonly launch: number;
+  readonly frame: number;
   /** How long `/health` may stay silent after a timed-out request before the runner counts as hung. */
   readonly hangCheck: number;
+  /**
+   * How long to wait for a runner that answers `/health` but is still busy with a timed-out
+   * request (XCTest waits up to 60 s for a just-launched app to register) before restarting it.
+   */
+  readonly busy: number;
 }
 
 export const DEFAULT_TIMEOUTS: RunnerTimeouts = {
@@ -54,11 +72,56 @@ export const DEFAULT_TIMEOUTS: RunnerTimeouts = {
   type: 30_000,
   home: 10_000,
   launch: 90_000,
-  // The runner serves requests one at a time, so /health queues behind a slow call: give it time.
+  frame: 10_000,
+  // An older runner serves /health behind a slow call; the current one answers it at once.
   hangCheck: 15_000,
+  busy: 90_000,
 };
 
-export type StableSnapshot = UISnapshot & { readonly stable: boolean; readonly waitedMs: number };
+/** Times of the last launch, in ms from the start of `launch()`. */
+export type LaunchReadiness = "source-first" | "frames-first" | "layout";
+
+export interface LaunchTiming {
+  readonly bundleId: string;
+  readonly mode: LaunchReadiness;
+  /** `simctl launch` returned (after Home). */
+  readonly launchedMs: number;
+  /** The picture was non-blank and unchanged for `minStableMs` (undefined: old runner without `/frame`). */
+  readonly visibleMs?: number;
+  /** A blank but stable picture was accepted after `blankAcceptMs`. */
+  readonly blank?: boolean;
+  /** The first `/source` answered. */
+  readonly firstSourceMs: number;
+  /** The layout was stable. */
+  readonly stableMs: number;
+  readonly stable: boolean;
+}
+
+export interface VisibleOptions {
+  readonly bundleId?: string;
+  /** Default 45 s. */
+  readonly timeoutMs?: number;
+  /** The picture must stay the same this long. Default 1000 ms (a splash screen changes sooner). */
+  readonly minStableMs?: number;
+  /** Accept a blank but unchanged picture after this long. Default 12 s. */
+  readonly blankAcceptMs?: number;
+  readonly intervalMs?: number;
+}
+
+export interface VisibleResult {
+  readonly visible: boolean;
+  readonly blank: boolean;
+  readonly waitedMs: number;
+  readonly frames: number;
+  readonly state?: string;
+}
+
+export type StableSnapshot = UISnapshot & {
+  readonly stable: boolean;
+  readonly waitedMs: number;
+  /** When the first `/source` of this wait answered (ms from its start). */
+  readonly firstMs?: number;
+};
 
 export interface RunnerDriverOptions {
   readonly udid: string;
@@ -70,12 +133,23 @@ export interface RunnerDriverOptions {
   /** Wait for a stable layout after tap/swipe/type. Default true. Launch always waits. */
   readonly settleAfterActions?: boolean;
   readonly settle?: SettleOptions;
+  /**
+   * How `launch()` decides the app is ready:
+   * - "source-first" (default): `/source` at once (it answers when the app can), then a stable
+   *   non-blank picture (`/frame`) and a second, equal layout;
+   * - "frames-first": a stable non-blank picture first, then two equal layouts;
+   * - "layout": two equal layouts at least 1.5 s apart (the original rule).
+   */
+  readonly launchReadiness?: LaunchReadiness;
   readonly log?: (message: string) => void;
 }
 
-interface HealthResponse {
+export interface HealthResponse {
   currentBundleId?: string;
   screen?: { w: number; h: number };
+  /** Set while a request holds the runner's main thread (the answer then comes from cached values). */
+  busy?: { route: string; ms: number; queued: number };
+  cached?: boolean;
 }
 
 interface SourceResponse {
@@ -91,19 +165,20 @@ function isPoint(target: TapTarget): target is Point {
   return typeof (target as Point).x === "number" && typeof (target as Point).y === "number";
 }
 
+/** Runner body for a selector: identifier, label, type, and `nth` as the runner's `index`. Never the flow's `index`/`frame`. */
 function selectorBody(selector: RunnerSelector | undefined): Record<string, unknown> {
   if (!selector) return {};
   const body: Record<string, unknown> = {};
   if (selector.id !== undefined) body.identifier = selector.id;
   if (selector.label !== undefined) body.label = selector.label;
   if (selector.type !== undefined) body.type = selector.type;
-  if (selector.index !== undefined) body.index = selector.index;
+  if (selector.nth !== undefined) body.index = selector.nth;
   return body;
 }
 
-/** Frame of the `index`-th node matching the selector, depth-first. */
+/** Frame of the `nth` node (default the first) matching id, label and type, depth-first. */
 export function findFrame(tree: UINode, selector: RunnerSelector): Rect | undefined {
-  let remaining = selector.index ?? 0;
+  let remaining = selector.nth ?? 0;
   let found: Rect | undefined;
   const walk = (node: UINode): boolean => {
     const matches =
@@ -131,14 +206,19 @@ export class RunnerDriver implements DeviceDriver {
   readonly timeouts: RunnerTimeouts;
   /** Target of source/tap/type when the call names no bundle id: the last launched app. */
   currentBundleId: string | undefined;
+  /** Timing of the last `launch()`. */
+  lastLaunch: LaunchTiming | undefined;
 
   readonly #onHang: (() => Promise<void>) | undefined;
   readonly #settleAfterActions: boolean;
   readonly #settle: SettleOptions;
+  readonly #launchReadiness: LaunchReadiness;
   readonly #log: (message: string) => void;
   #restarting: Promise<void> | undefined;
   #screen: ScreenInfo | undefined;
   #lastStable: { snapshot: StableSnapshot; at: number } | undefined;
+  /** False once the runner answered 404 for `/frame` (a runner built before the route existed). */
+  #hasFrame = true;
 
   constructor(options: RunnerDriverOptions) {
     this.udid = options.udid;
@@ -147,6 +227,7 @@ export class RunnerDriver implements DeviceDriver {
     this.#onHang = options.onHang;
     this.#settleAfterActions = options.settleAfterActions ?? true;
     this.#settle = options.settle ?? {};
+    this.#launchReadiness = options.launchReadiness ?? "source-first";
     this.#log = options.log ?? (() => undefined);
   }
 
@@ -165,11 +246,95 @@ export class RunnerDriver implements DeviceDriver {
 
   async launch(options: LaunchOptions): Promise<void> {
     this.#lastStable = undefined;
+    const started = Date.now();
+    const bundleId = options.bundleId;
     // Home first: launching while another app is in front adds a "◀ App" back-link to the status bar.
     await this.home().catch((error: unknown) => this.#log(`home before launch failed: ${String(error)}`));
-    await launchApp(this.udid, options.bundleId, options.args ?? [], options.env ?? {});
-    this.currentBundleId = options.bundleId;
-    await this.waitForStable({ bundleId: options.bundleId, minStableMs: 1500, timeoutMs: 30_000 });
+    await launchApp(this.udid, bundleId, options.args ?? [], options.env ?? {});
+    this.currentBundleId = bundleId;
+    const launchedMs = Date.now() - started;
+    const mode = this.#launchReadiness;
+
+    let visible: VisibleResult | undefined;
+    let visibleAt: number | undefined;
+    let firstSourceMs: number;
+    let snapshot: StableSnapshot;
+    if (mode === "frames-first") {
+      // A stable, non-blank picture first (cheap /frame calls), then two equal layouts.
+      visible = await this.waitForVisible({ bundleId });
+      visibleAt = visible ? Date.now() - started : undefined;
+      snapshot = await this.waitForStable({ bundleId, minStableMs: visible?.visible ? 0 : 1500, timeoutMs: 30_000 });
+      firstSourceMs = (visibleAt ?? launchedMs) + (snapshot.firstMs ?? snapshot.waitedMs);
+    } else if (mode === "source-first" && this.#hasFrame) {
+      // Ask for the layout at once: the request starts XCTest's attach to the new process while the
+      // app is still loading, and answers as soon as the app can (it holds the runner meanwhile;
+      // /health still answers, so this is not mistaken for a hang). Then confirm with a stable
+      // non-blank picture and a second, equal layout instead of a fixed 1.5 s window.
+      let first = await this.#firstSource(bundleId, 90_000);
+      firstSourceMs = Date.now() - started;
+      const deadline = Date.now() + 30_000;
+      let stable = false;
+      for (;;) {
+        visible = await this.waitForVisible({ bundleId, minStableMs: 500, blankAcceptMs: 8_000, timeoutMs: Math.max(1_000, deadline - Date.now()) });
+        visibleAt ??= Date.now() - started;
+        if (!visible) {
+          // A runner without /frame: the old rule.
+          const settled = await this.waitForStable({ bundleId, minStableMs: 1500, timeoutMs: 30_000 });
+          first = settled;
+          stable = settled.stable;
+          break;
+        }
+        const next = await this.source(bundleId);
+        if (layoutHash(next.tree) === layoutHash(first.tree)) {
+          first = next;
+          stable = true;
+          break;
+        }
+        first = next;
+        if (Date.now() > deadline) {
+          this.#log("layout did not settle within 30 s after the launch; using the last snapshot");
+          break;
+        }
+      }
+      snapshot = { ...first, stable, waitedMs: Date.now() - started - launchedMs };
+      this.#lastStable = { snapshot, at: Date.now() };
+    } else {
+      // The original rule: two equal layouts at least 1.5 s apart (a splash screen changes sooner).
+      snapshot = await this.waitForStable({ bundleId, minStableMs: 1500, timeoutMs: 30_000 });
+      firstSourceMs = launchedMs + (snapshot.firstMs ?? snapshot.waitedMs);
+    }
+    const stableMs = Date.now() - started;
+    this.lastLaunch = {
+      bundleId,
+      mode,
+      launchedMs,
+      ...(visibleAt !== undefined ? { visibleMs: visibleAt } : {}),
+      ...(visible?.blank ? { blank: true } : {}),
+      firstSourceMs,
+      stableMs,
+      stable: snapshot.stable,
+    };
+    this.#log(
+      `launched ${bundleId} (${mode}): simctl ${launchedMs} ms, first /source at ${firstSourceMs} ms, ` +
+        (visibleAt !== undefined ? `${visible?.visible ? (visible.blank ? "blank but stable" : "stable picture") : "picture not stable"} at ${visibleAt} ms, ` : "") +
+        `${snapshot.stable ? "stable" : "unstable"} layout at ${stableMs} ms`,
+    );
+  }
+
+  /** The first `/source` after a launch: retried while the app is not running yet, with a long timeout. */
+  async #firstSource(bundleId: string, timeoutMs: number): Promise<UISnapshot> {
+    const deadline = Date.now() + timeoutMs;
+    const path = `/source?bundleId=${encodeURIComponent(bundleId)}`;
+    for (;;) {
+      try {
+        const r = await this.#request("/source", () => this.http.json<SourceResponse>("GET", path, undefined, Math.max(5_000, deadline - Date.now())), true);
+        return { bundleId: r.bundleId, state: r.state, count: r.count, tree: r.tree };
+      } catch (error) {
+        if (error instanceof RunnerRestartedError || Date.now() > deadline) throw error;
+        // "<bundle> is not running" right after simctl launch: keep asking.
+        await sleep(300);
+      }
+    }
   }
 
   /** XCUIApplication.launch() through the runner. Slower and can block after an install; prefer launch(). */
@@ -272,6 +437,76 @@ export class RunnerDriver implements DeviceDriver {
   }
 
   /**
+   * A grayscale thumbnail of the screen and the app's state (`GET /frame`). Cheap and never blocked
+   * by the app: the picture comes from the system, not the accessibility tree. Undefined when the
+   * runner predates the route.
+   */
+  async frame(bundleId?: string, size: { w: number; h: number } = { w: 72, h: 156 }): Promise<Frame | undefined> {
+    if (!this.#hasFrame) return undefined;
+    const id = bundleId ?? this.currentBundleId;
+    const query = `w=${size.w}&h=${size.h}${id ? `&bundleId=${encodeURIComponent(id)}` : ""}`;
+    try {
+      const r = await this.#request(
+        "/frame",
+        () => this.http.json<{ w: number; h: number; gray: string; state?: string }>("GET", `/frame?${query}`, undefined, this.timeouts.frame),
+        true,
+      );
+      return { w: r.w, h: r.h, gray: new Uint8Array(Buffer.from(r.gray, "base64")), ...(r.state ? { state: r.state } : {}) };
+    } catch (error) {
+      if (error instanceof RunnerError && error.status === 404) {
+        this.#hasFrame = false;
+        this.#log("this runner has no /frame route; launch readiness falls back to layout stability");
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Waits until the app is in the foreground and its picture is non-blank and unchanged for
+   * `minStableMs` (a blank picture is accepted after `blankAcceptMs`). Uses `/frame` only, so the
+   * runner stays free while the app loads. Undefined when the runner has no `/frame`.
+   */
+  async waitForVisible(options: VisibleOptions = {}): Promise<VisibleResult | undefined> {
+    const timeoutMs = options.timeoutMs ?? 45_000;
+    const minStableMs = options.minStableMs ?? 1_000;
+    const blankAcceptMs = options.blankAcceptMs ?? 12_000;
+    const intervalMs = options.intervalMs ?? 150;
+    const start = Date.now();
+    let previous: Frame | undefined;
+    let sameSince = start;
+    let frames = 0;
+    let state: string | undefined;
+    for (;;) {
+      let frame: Frame | undefined;
+      try {
+        frame = await this.frame(options.bundleId);
+      } catch (error) {
+        if (error instanceof RunnerRestartedError) throw error;
+        this.#log(`frame failed: ${(error as Error).message}`);
+      }
+      if (!this.#hasFrame) return undefined;
+      const now = Date.now();
+      if (frame) {
+        frames++;
+        state = frame.state;
+        const foreground = frame.state === undefined || frame.state === "foreground";
+        if (!previous || !foreground || !sameFrame(previous, frame)) sameSince = now;
+        previous = frame;
+        const steady = now - sameSince;
+        const blank = contentShare(frame) < 0.004;
+        if (foreground && !blank && steady >= minStableMs) return { visible: true, blank: false, waitedMs: now - start, frames, ...(state ? { state } : {}) };
+        if (foreground && blank && steady >= blankAcceptMs) return { visible: true, blank: true, waitedMs: now - start, frames, ...(state ? { state } : {}) };
+      }
+      if (now - start > timeoutMs) {
+        this.#log(`the app's picture did not settle within ${timeoutMs} ms (state ${state ?? "?"}); asking for the layout anyway`);
+        return { visible: false, blank: false, waitedMs: now - start, frames, ...(state ? { state } : {}) };
+      }
+      await sleep(intervalMs);
+    }
+  }
+
+  /**
    * Polls `/source` until the layout is unchanged between two polls (and for `minStableMs`).
    * Returns the last snapshot with `stable: false` on timeout instead of throwing. An app that is
    * not running yet (right after a launch) is retried until the timeout.
@@ -288,14 +523,16 @@ export class RunnerDriver implements DeviceDriver {
     let lastHash = "";
     let sameSince = 0;
     let lastError: unknown;
+    let firstMs: number | undefined;
     for (;;) {
       try {
         const snapshot = await this.source(options.bundleId);
         const hash = layoutHash(snapshot.tree);
         const now = Date.now();
+        firstMs ??= now - start;
         if (last && hash === lastHash) {
           if (now - sameSince >= minStableMs) {
-            const result: StableSnapshot = { ...snapshot, stable: true, waitedMs: now - start };
+            const result: StableSnapshot = { ...snapshot, stable: true, waitedMs: now - start, firstMs };
             this.#lastStable = { snapshot: result, at: now };
             return result;
           }
@@ -312,7 +549,7 @@ export class RunnerDriver implements DeviceDriver {
       if (Date.now() - start > timeoutMs) {
         if (!last) throw lastError instanceof Error ? lastError : new RunnerError("/source", "no snapshot before timeout");
         this.#log(`layout did not settle within ${timeoutMs} ms; using the last snapshot`);
-        return { ...last, stable: false, waitedMs: Date.now() - start };
+        return { ...last, stable: false, waitedMs: Date.now() - start, ...(firstMs !== undefined ? { firstMs } : {}) };
       }
       await sleep(intervalMs);
     }
@@ -336,9 +573,23 @@ export class RunnerDriver implements DeviceDriver {
     try {
       return await call();
     } catch (error) {
-      const unreachable = error instanceof RunnerTimeoutError || (error instanceof RunnerError && /request failed/.test(error.message));
-      if (!unreachable || !this.#onHang) throw error;
-      if (await this.#answers()) throw error; // slow, not hung
+      const timedOut = error instanceof RunnerTimeoutError;
+      const unreachable = timedOut || (error instanceof RunnerError && /request failed/.test(error.message));
+      if (!unreachable) throw error;
+      const health = await this.#answers();
+      if (health) {
+        // Alive. If it is still busy with this (or an earlier) request, wait for it instead of
+        // restarting a runner that works: XCTest can hold a first snapshot for up to 60 s.
+        const idle = await this.#untilIdle(route, health);
+        if (idle) {
+          if (idempotent) return call();
+          // A timed-out action was received and has now finished: its effect happened.
+          if (timedOut) return {} as T;
+          throw error;
+        }
+        this.#log(`runner stayed busy for more than ${Math.round(this.timeouts.busy / 1000)} s after ${route}; treating it as hung`);
+      }
+      if (!this.#onHang) throw error;
       this.#log(`runner is not answering after ${route}; restarting it`);
       this.#restarting ??= this.#onHang().finally(() => {
         this.#restarting = undefined;
@@ -349,16 +600,36 @@ export class RunnerDriver implements DeviceDriver {
     }
   }
 
-  async #answers(): Promise<boolean> {
+  /** `/health` within `hangCheck`, or undefined when the runner stays silent (hung or gone). */
+  async #answers(): Promise<HealthResponse | undefined> {
     const deadline = Date.now() + this.timeouts.hangCheck;
     while (Date.now() < deadline) {
       try {
-        await this.health(Math.max(1_000, deadline - Date.now()));
-        return true;
+        return await this.health(Math.max(1_000, deadline - Date.now()));
       } catch {
         await sleep(500);
       }
     }
-    return false;
+    return undefined;
+  }
+
+  /** Polls `/health` until the runner is no longer busy (true) or `timeouts.busy` has passed (false). */
+  async #untilIdle(route: string, health: HealthResponse): Promise<boolean> {
+    if (!health.busy) return true;
+    const deadline = Date.now() + this.timeouts.busy;
+    let noted = 0;
+    let current: HealthResponse | undefined = health;
+    while (current?.busy) {
+      if (Date.now() - noted > 10_000) {
+        this.#log(`runner busy with ${current.busy.route} for ${Math.round(current.busy.ms / 1000)} s (${current.busy.queued} queued) after ${route} timed out; waiting`);
+        noted = Date.now();
+      }
+      if (Date.now() > deadline) return false;
+      await sleep(500);
+      current = await this.health().catch(() => undefined);
+      if (!current) current = await this.#answers();
+      if (!current) return false;
+    }
+    return true;
   }
 }

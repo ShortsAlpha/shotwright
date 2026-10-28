@@ -9,15 +9,24 @@
  *
  * Taps resolve by identifier, then by structure (type, position among siblings, frame), then by
  * label. With `repair`, a target that is not found, or a screenshot step on the wrong screen, is
- * repaired by a model (repair.ts) instead of tapping the recorded point blindly.
+ * repaired by a model (repair.ts) instead of tapping the recorded point blindly; successful
+ * repairs are written back to `flow.repaired.json` next to the flow (repaired.ts).
+ *
+ * Screenshots are taken after capture settling (capture.ts): a stable tree and two near-identical
+ * screenshots, capped at 4 s. A screen recorded at the top of its list (`expect.atTop`) is
+ * scrolled back there first if something left it scrolled.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { DeviceDriver, ElementSelector, Flow, ScreenInfo, ScreenshotStep, TapStep, UISnapshot } from "@shotwright/core";
+import { isAbortError, sleep, throwIfAborted } from "./abort.ts";
 import { isRtlLanguage, performSwipe, performType, planTap, resolveTarget, scrollIntoView, type ExecutedTap } from "./actions.ts";
+import { settleCapture, type CaptureSettleOptions } from "./capture.ts";
 import { flatten, selectElements, stableIdentifiers, stableSource, type FlatNode, type Observation } from "./observe.ts";
 import type { ScreenRecord } from "./recorder.ts";
 import { StepRepairer, type RepairOptions, type RepairRecord } from "./repair.ts";
+import { patchesFromRepairs, saveRepairedFlow, type FlowPatch } from "./repaired.ts";
+import { listScrollState, scrollToTop } from "./scroll.ts";
 
 export type { RepairOptions, RepairRecord, RepairAttempt } from "./repair.ts";
 
@@ -42,11 +51,44 @@ export interface ReplayOptions {
   readonly findTimeoutMs?: number;
   readonly stopOnError?: boolean;
   /**
-   * Repair broken steps with a model. Off when omitted. `{}` means Muse Spark 1.3, 2 model calls
-   * per step, $0.10 per replay; `{ provider: "open" }` uses Muse Spark Open on Baseten (free).
+   * Repair broken steps with a model. Off when omitted. `{}` or `{ provider: "spark" }` means Muse
+   * Spark 1.3, 2 model calls per step, $0.10 per replay; `{ provider: "open" }` uses Muse Spark
+   * Open on Baseten (free). Without `referenceImage`, the screenshots the steps were recorded on
+   * are loaded from the run directory (`runDir`, see below).
    */
   readonly repair?: RepairOptions;
+  /**
+   * The exploration's output directory (explore's `outDir`: exploration.json, flow.json,
+   * steps/NNN.jpg). Repair reads its reference screenshots there and successful repairs are
+   * written to `flow.repaired.json` in it. Default: the nearest directory above `outDir` (up to
+   * three levels) that has an exploration.json, so `outDir: <run>/replay/<locale>` just works.
+   */
+  readonly runDir?: string;
+  /**
+   * For each flow step, the exploration observation it was recorded on (ExplorationResult.stepSources).
+   * Default: read from `<runDir>/exploration.json` when its flow has the same steps.
+   */
+  readonly stepSources?: ReadonlyArray<number | null>;
+  /** Write successful repairs to `<runDir>/flow.repaired.json`. Default true (needs a run directory). */
+  readonly saveRepairs?: boolean;
+  /** Capture settling before each screenshot (see capture.ts). Default on, 4 s cap; `false` turns it off. */
+  readonly settle?: CaptureSettleOptions | false;
+  /** After every step, with its result (and the screenshot for screenshot steps). */
+  readonly onStep?: (event: ReplayStepEvent) => void;
+  /** Stops the replay before the next step (a device call in flight finishes); the result has `aborted: true`. */
+  readonly signal?: AbortSignal;
   readonly log?: (message: string) => void;
+}
+
+/** `onStep`: one finished step. */
+export interface ReplayStepEvent extends ReplayStepResult {
+  /** Steps in the flow. */
+  readonly total: number;
+  /** "miss": a missing anchor left to the screenshot step's repair. */
+  readonly status: "ok" | "miss" | "failed";
+  readonly locale: Locale | undefined;
+  /** Screenshot steps: the captured screenshot (also in `ReplayResult.screenshots`). */
+  readonly shot?: ReplayShot;
 }
 
 export interface ReplayCheck {
@@ -65,6 +107,10 @@ export interface ReplayShot {
   readonly checks: ReplayCheck;
   /** Reached the expected screen only after a model repair. */
   readonly repaired?: boolean;
+  /** Capture settling: screenshots taken, time waited, and whether the picture settled before the cap. */
+  readonly capture?: { readonly frames: number; readonly waitedMs: number; readonly settled: boolean };
+  /** The list was scrolled back to its top before the screenshot (`expect.atTop`). */
+  readonly scrolledToTop?: boolean;
 }
 
 /** How a tap step was carried out: target found by id, structure or label; by a model repair; at the recorded point; or a coordinate-only step. */
@@ -92,6 +138,13 @@ export interface ReplayResult {
   /** Every repair attempted in this replay. */
   readonly repairs: RepairRecord[];
   readonly repairCostUsd: number;
+  /** The signal fired; the replay stopped early. */
+  readonly aborted?: boolean;
+  /** The flow with every repair so far written back (also saved as `repairedFlowFile`). */
+  readonly repairedFlow?: Flow;
+  readonly repairedFlowFile?: string;
+  /** This replay's patches (see repaired.ts). */
+  readonly patches?: FlowPatch[];
 }
 
 const DEFAULT_REGION: Record<string, string> = {
@@ -141,8 +194,34 @@ const treeKey = (nodes: readonly FlatNode[]) => nodes.map((n) => `${n.type}|${n.
 const describeTarget = (selector: ElementSelector) =>
   [selector.type, selector.label ? `"${selector.label.slice(0, 60)}"` : undefined, selector.id ? `#${selector.id}` : undefined].filter(Boolean).join(" ");
 
+/** The nearest directory at or above `start` (up to `levels` up) with an exploration.json. */
+function findRunDir(start: string | undefined, levels = 3): string | undefined {
+  let dir = start;
+  for (let i = 0; dir && i <= levels; i++) {
+    if (existsSync(join(dir, "exploration.json"))) return dir;
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return undefined;
+}
+
+/** stepSources from `<runDir>/exploration.json`, when its flow has the same steps as `flow`. */
+function loadStepSources(runDir: string, flow: Flow): ReadonlyArray<number | null> | undefined {
+  try {
+    const exploration = JSON.parse(readFileSync(join(runDir, "exploration.json"), "utf8")) as { flow?: Flow; stepSources?: Array<number | null> };
+    const shape = (f: Flow | undefined) => f?.steps.map((s) => s.action).join(",");
+    if (exploration.stepSources && shape(exploration.flow) === shape(flow)) return exploration.stepSources;
+  } catch {
+    // no exploration.json, or unreadable
+  }
+  return undefined;
+}
+
 export async function replayFlow(driver: DeviceDriver, flow: Flow, options: ReplayOptions = {}): Promise<ReplayResult> {
   const log = options.log ?? (() => undefined);
+  const signal = options.signal;
+  const settle = options.settle === false ? undefined : (options.settle ?? {});
   const started = Date.now();
   const screen: ScreenInfo = await driver.screen();
   const steps: ReplayStepResult[] = [];
@@ -157,11 +236,33 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
   const localeText = options.locale
     ? `${options.locale.language}${options.locale.region ? ` (${options.locale.region})` : ""}, ${rtl ? "right to left (mirrored layout)" : "left to right"}`
     : "the recording's own language";
-  const repairer = options.repair
-    ? new StepRepairer(options.repair, { driver, screen, bundleId: () => bundleId, localeText, rtl, log })
+  const runDir = options.runDir ?? findRunDir(options.outDir);
+  let repairOptions = options.repair;
+  if (repairOptions && !repairOptions.referenceImage && runDir) {
+    // Repair references: the screenshot each step was recorded on (<runDir>/steps/NNN.jpg).
+    const sources = options.stepSources ?? loadStepSources(runDir, flow);
+    log(sources ? `  repair references: ${join(runDir, "steps")}` : `  repair references: none (the flow's steps differ from ${join(runDir, "exploration.json")})`);
+    if (sources) {
+      repairOptions = {
+        ...repairOptions,
+        referenceImage: (stepIndex: number) => {
+          const at = sources[stepIndex];
+          if (at === null || at === undefined) return undefined;
+          try {
+            return new Uint8Array(readFileSync(join(runDir, "steps", `${String(at).padStart(3, "0")}.jpg`)));
+          } catch {
+            return undefined;
+          }
+        },
+      };
+    }
+  }
+  const repairer = repairOptions
+    ? new StepRepairer(repairOptions, { driver, screen, bundleId: () => bundleId, localeText, rtl, log, ...(signal ? { signal } : {}) })
     : undefined;
 
   const snapshotNodes = async (): Promise<{ snapshot: UISnapshot; nodes: FlatNode[] }> => {
+    throwIfAborted(signal);
     const snapshot = await stableSource(driver, bundleId);
     return { snapshot, nodes: flatten(snapshot.tree) };
   };
@@ -173,7 +274,7 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
       const { nodes } = await snapshotNodes();
       const found = resolveTarget(nodes, selector, screen, { ...(fallback ? { fallback } : {}), rtl });
       if (found || selector.id === undefined || Date.now() > deadline) return { found, nodes };
-      await new Promise((r) => setTimeout(r, 400));
+      await sleep(400, signal);
     }
   };
 
@@ -232,11 +333,16 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
     };
   };
 
+  let aborted = false;
   for (const [index, step] of flow.steps.entries()) {
     if (failed && options.stopOnError) break;
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
     const t0 = Date.now();
-    const record = (ok: boolean, detail?: string, extra: { via?: StepVia; repair?: RepairRecord; soft?: boolean } = {}) => {
-      steps.push({
+    const record = (ok: boolean, detail?: string, extra: { via?: StepVia; repair?: RepairRecord; soft?: boolean; shot?: ReplayShot } = {}) => {
+      const result: ReplayStepResult = {
         index,
         action: step.action,
         ok,
@@ -244,9 +350,21 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
         ...(detail ? { detail } : {}),
         ...(extra.via ? { via: extra.via } : {}),
         ...(extra.repair ? { repair: extra.repair } : {}),
-      });
+      };
+      steps.push(result);
       log(`  ${String(index).padStart(2)} ${step.action.padEnd(10)} ${ok ? "ok  " : extra.soft ? "miss" : "FAIL"} ${Date.now() - t0} ms${extra.via ? ` [${extra.via}]` : ""}${detail ? `  ${detail}` : ""}`);
       if (!ok && !extra.soft) failed = true;
+      try {
+        options.onStep?.({
+          ...result,
+          total: flow.steps.length,
+          status: ok ? "ok" : extra.soft ? "miss" : "failed",
+          locale: options.locale,
+          ...(extra.shot ? { shot: extra.shot } : {}),
+        });
+      } catch (error) {
+        log(`  onStep threw: ${(error as Error).message}`);
+      }
     };
     try {
       switch (step.action) {
@@ -326,6 +444,11 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
           record(true);
           break;
         }
+        case "scrollToTop": {
+          const result = await scrollToTop(driver, screen, bundleId, { log });
+          record(result.via !== "failed", result.via === "swipes" ? `${result.swipes} drag(s)` : result.via);
+          break;
+        }
         case "waitFor": {
           const { found } = await find(step.target, step.timeoutMs);
           lastAnchor = step.target;
@@ -346,34 +469,96 @@ export async function replayFlow(driver: DeviceDriver, flow: Flow, options: Repl
               return result.verified;
             });
           }
-          const png = await driver.screenshot();
+          // Recorded at the top of its list, now scrolled (a tab kept an offset, or a scroll into
+          // view on the way): scroll back so the screenshot matches the recording.
+          let scrolledToTop = false;
+          if (step.expect?.atTop) {
+            const state = listScrollState(result.nodes, screen);
+            if (state?.root && state.scrolled) {
+              const moved = await scrollToTop(driver, screen, bundleId, { log });
+              scrolledToTop = moved.changed;
+              log(`     scrolled the list back to the top before "${step.name}" (${moved.via}, ${moved.ms} ms)`);
+              if (moved.changed) result = await checkScreen(step, lastAnchor);
+            }
+          }
+          let png: Uint8Array;
+          let capture: ReplayShot["capture"];
+          if (settle) {
+            const settled = await settleCapture(driver, { bundleId, log, label: `"${step.name}"`, ...(signal ? { signal } : {}) }, settle);
+            png = settled.png;
+            capture = { frames: settled.frames, waitedMs: settled.waitedMs, settled: settled.settled };
+          } else {
+            png = await driver.screenshot();
+          }
           let file: string | undefined;
           if (options.outDir) {
             file = join(options.outDir, `${step.name}.png`);
             writeFileSync(file, png);
           }
           const repaired = repair?.ok === true;
-          screenshots.push({ name: step.name, png, verified: result.verified, checks: result.checks, ...(file ? { file } : {}), ...(repaired ? { repaired } : {}) });
+          const shot: ReplayShot = {
+            name: step.name,
+            png,
+            verified: result.verified,
+            checks: result.checks,
+            ...(file ? { file } : {}),
+            ...(repaired ? { repaired } : {}),
+            ...(capture ? { capture } : {}),
+            ...(scrolledToTop ? { scrolledToTop } : {}),
+          };
+          screenshots.push(shot);
           lastAnchor = undefined;
-          record(result.verified, `${step.name} ${JSON.stringify(result.checks)}${repair ? ` repair ${repair.ok ? "ok" : "failed"} ($${repair.costUsd.toFixed(4)})` : ""}`, {
+          const captureNote = capture ? ` capture ${capture.frames} frames ${capture.waitedMs} ms${capture.settled ? "" : " (cap hit)"}` : "";
+          record(result.verified, `${step.name} ${JSON.stringify(result.checks)}${captureNote}${repair ? ` repair ${repair.ok ? "ok" : "failed"} ($${repair.costUsd.toFixed(4)})` : ""}`, {
             ...(repair ? { repair, via: "repair" as const } : {}),
+            shot,
           });
           break;
         }
       }
     } catch (error) {
+      if (isAbortError(error, signal)) {
+        aborted = true;
+        log(`  ${String(index).padStart(2)} ${step.action.padEnd(10)} aborted`);
+        break;
+      }
       record(false, (error as Error).message.slice(0, 300));
     }
   }
 
+  // Successful repairs go back into the flow (flow.repaired.json next to flow.json).
+  const repairs = repairer?.records ?? [];
+  let repairedFlow: Flow | undefined;
+  let repairedFlowFile: string | undefined;
+  let patches: FlowPatch[] | undefined;
+  if (repairs.some((r) => r.ok)) {
+    patches = patchesFromRepairs(flow, repairs, { rtl, screen, ...(options.locale ? { locale: options.locale.language } : {}) });
+    if (patches.length > 0 && runDir && options.saveRepairs !== false) {
+      try {
+        const saved = saveRepairedFlow(runDir, flow, patches);
+        if (saved) {
+          repairedFlow = saved.flow;
+          repairedFlowFile = saved.path;
+          log(`  wrote ${patches.length} repair(s) back to ${saved.path} (${saved.patches.length} in total)`);
+        }
+      } catch (error) {
+        log(`  could not write the repaired flow: ${(error as Error).message}`);
+      }
+    }
+  }
+
   return {
-    ok: !failed && screenshots.length === flow.steps.filter((s) => s.action === "screenshot").length && screenshots.every((s) => s.verified),
+    ok: !aborted && !failed && screenshots.length === flow.steps.filter((s) => s.action === "screenshot").length && screenshots.every((s) => s.verified),
     locale: options.locale,
     launchArgs,
     screenshots,
     steps,
     totalMs: Date.now() - started,
-    repairs: repairer?.records ?? [],
+    repairs,
     repairCostUsd: repairer?.costUsd ?? 0,
+    ...(aborted ? { aborted } : {}),
+    ...(repairedFlow ? { repairedFlow } : {}),
+    ...(repairedFlowFile ? { repairedFlowFile } : {}),
+    ...(patches ? { patches } : {}),
   };
 }

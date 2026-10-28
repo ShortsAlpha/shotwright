@@ -24,7 +24,14 @@ final class RunnerTests: XCTestCase {
         let port = UInt16(env["SHOTWRIGHT_PORT"] ?? "") ?? 8615
         let jobs = MainThreadJobs()
         let server = try HTTPServer(port: port) { [driver] req, respond in
-            jobs.push { respond(driver.handle(req)) }
+            // While a slow XCUI call (the first snapshot after a launch can take 10-60 s) holds the
+            // main thread, answer /health from this queue with cached values and what is running,
+            // so the agent can tell "busy" from "hung" instead of restarting a runner that works.
+            if req.method == "GET", req.path == "/health", let busy = jobs.busy() {
+                respond(.json(driver.cachedHealth(busy: busy)))
+                return
+            }
+            jobs.push(route: "\(req.method) \(req.path)") { respond(driver.handle(req)) }
         }
         server.start { state in NSLog("SHOTWRIGHT_RUNNER listener %@ port=%d", state, Int(port)) }
         NSLog("SHOTWRIGHT_RUNNER_READY port=%d", Int(port))
@@ -32,6 +39,7 @@ final class RunnerTests: XCTestCase {
         while !driver.shouldStop {
             if let job = jobs.pop() {
                 job()
+                jobs.finished()
             } else {
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
             }
@@ -40,14 +48,28 @@ final class RunnerTests: XCTestCase {
     }
 }
 
-/// Thread-safe FIFO of closures executed on the main thread by the test loop.
+/// Thread-safe FIFO of closures executed on the main thread by the test loop. Remembers which
+/// route is running and since when, for `/health` while the main thread is busy.
 final class MainThreadJobs {
-    private var items: [() -> Void] = []
+    private var items: [(route: String, job: () -> Void)] = []
+    private var running: (route: String, since: CFAbsoluteTime)?
     private let lock = NSLock()
-    func push(_ job: @escaping () -> Void) { lock.lock(); items.append(job); lock.unlock() }
+    func push(route: String, _ job: @escaping () -> Void) {
+        lock.lock(); items.append((route, job)); lock.unlock()
+    }
     func pop() -> (() -> Void)? {
         lock.lock(); defer { lock.unlock() }
-        return items.isEmpty ? nil : items.removeFirst()
+        guard !items.isEmpty else { return nil }
+        let next = items.removeFirst()
+        running = (next.route, CFAbsoluteTimeGetCurrent())
+        return next.job
+    }
+    func finished() { lock.lock(); running = nil; lock.unlock() }
+    /// The running route, how long it has run (ms) and how many requests wait behind it; nil when idle.
+    func busy() -> (route: String, ms: Int, queued: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let running else { return nil }
+        return (running.route, Int((CFAbsoluteTimeGetCurrent() - running.since) * 1000), items.count)
     }
 }
 
@@ -57,6 +79,20 @@ final class Driver {
     /// Target of /source, /tap {identifier}, /type when the request names no bundleId.
     var currentBundleId = "com.apple.springboard"
     private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    /// Last /health computed on the main thread, served while the main thread is busy.
+    private var lastHealth: [String: Any] = ["runner": "shotwright"]
+    private let healthLock = NSLock()
+
+    /// /health without touching XCUI (safe off the main thread): the last screen size and bundle id,
+    /// plus `busy: {route, ms, queued}`.
+    func cachedHealth(busy: (route: String, ms: Int, queued: Int)) -> [String: Any] {
+        healthLock.lock(); var h = lastHealth; healthLock.unlock()
+        h["busy"] = ["route": busy.route, "ms": busy.ms, "queued": busy.queued]
+        h["cached"] = true
+        h["ok"] = true
+        h["ms"] = 0
+        return h
+    }
 
     func handle(_ req: HTTPRequest) -> HTTPResponse {
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -67,6 +103,8 @@ final class Driver {
             switch (req.method, req.path) {
             case ("GET", "/health"): result = health()
             case ("GET", "/source"): result = try source(req.query)
+            case ("GET", "/state"): result = state(req.query)
+            case ("GET", "/frame"): result = frame(req.query)
             case ("GET", "/screenshot"):
                 return HTTPResponse(status: 200, contentType: "image/png",
                                     body: XCUIScreen.main.screenshot().pngRepresentation)
@@ -97,9 +135,39 @@ final class Driver {
 
     private func health() -> [String: Any] {
         let f = springboard.frame
-        return ["runner": "shotwright", "currentBundleId": currentBundleId,
-                "screen": ["w": num(f.width), "h": num(f.height)],
-                "orientation": XCUIDevice.shared.orientation.rawValue]
+        let h: [String: Any] = ["runner": "shotwright", "currentBundleId": currentBundleId,
+                                "screen": ["w": num(f.width), "h": num(f.height)],
+                                "orientation": XCUIDevice.shared.orientation.rawValue]
+        healthLock.lock(); lastHealth = h; healthLock.unlock()
+        return h
+    }
+
+    /// App state only (process monitor; no accessibility snapshot, so it never waits for the app).
+    private func state(_ q: [String: String]) -> [String: Any] {
+        let id = q["bundleId"] ?? currentBundleId
+        return ["bundleId": id, "state": stateName(XCUIApplication(bundleIdentifier: id).state)]
+    }
+
+    /// A small grayscale thumbnail of the screen (default 72 x 156, row-major, base64) and the
+    /// app's state. The screenshot comes from the system, not the app's accessibility tree, so it
+    /// answers in ~0.2 s even while a just-launched app is still loading and a snapshot would block.
+    /// Used to wait until the app shows a stable, non-blank frame before the first `/source`.
+    private func frame(_ q: [String: String]) -> [String: Any] {
+        let w = max(8, min(Int(q["w"] ?? "") ?? 72, 400))
+        let h = max(8, min(Int(q["h"] ?? "") ?? 156, 900))
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        if let cg = XCUIScreen.main.screenshot().image.cgImage {
+            pixels.withUnsafeMutableBytes { buf in
+                if let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                       space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+                    ctx.interpolationQuality = .medium
+                    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+                }
+            }
+        }
+        var result: [String: Any] = ["w": w, "h": h, "gray": Data(pixels).base64EncodedString()]
+        if let id = q["bundleId"] { result["bundleId"] = id; result["state"] = stateName(XCUIApplication(bundleIdentifier: id).state) }
+        return result
     }
 
     private func source(_ q: [String: String]) throws -> [String: Any] {

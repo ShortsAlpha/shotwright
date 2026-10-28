@@ -40,7 +40,9 @@ export const ElementSelectorSchema = z
     /**
      * Position among the siblings of the same `type` in the parent element, 0-based. Structural
      * replay matches type + index + a frame near `frame` before trying the (localized) label.
-     * Not the runner's `index` (n-th match of the whole query): drivers ignore it.
+     * Not the runner's `index` (n-th match of the whole query): drivers must not forward it
+     * (RunnerDriver drops `index` and `frame`; the explorer resolves structure itself and taps
+     * the element's centre).
      */
     index: z.number().int().min(0).optional(),
     /** The element's frame when recorded, normalized to the screen. */
@@ -91,6 +93,16 @@ export const TypeTextStepSchema = z.object({
   target: ElementSelectorSchema.optional(),
 });
 
+/**
+ * Scrolls the screen's main list or scroll view back to its top (status-bar tap, then exact
+ * swipes if that did not reach the top). The explorer records it when a marked screen is a
+ * list root that was left scrolled by an earlier action: screenshots of a list at its top have
+ * the large title and no content blurred under the bars.
+ */
+export const ScrollToTopStepSchema = z.object({
+  action: z.literal("scrollToTop"),
+});
+
 export const WaitForStepSchema = z.object({
   action: z.literal("waitFor"),
   target: ElementSelectorSchema,
@@ -108,6 +120,11 @@ export const ExpectedScreenSchema = z.object({
   title: z.string().max(200).optional(),
   /** Element types of the recorded screen, in order; compared by sequence similarity. */
   structure: z.array(nonEmpty).max(200).optional(),
+  /**
+   * The screen is a navigation root whose main list was at its top when recorded. Replay scrolls
+   * it back to the top before the screenshot if something left it scrolled.
+   */
+  atTop: z.boolean().optional(),
 });
 
 export const ScreenshotStepSchema = z.object({
@@ -125,6 +142,7 @@ export const FlowStepSchema = z.discriminatedUnion("action", [
   TapStepSchema,
   SwipeStepSchema,
   TypeTextStepSchema,
+  ScrollToTopStepSchema,
   WaitForStepSchema,
   ScreenshotStepSchema,
 ]);
@@ -157,6 +175,7 @@ export type LaunchStep = z.infer<typeof LaunchStepSchema>;
 export type TapStep = z.infer<typeof TapStepSchema>;
 export type SwipeStep = z.infer<typeof SwipeStepSchema>;
 export type TypeTextStep = z.infer<typeof TypeTextStepSchema>;
+export type ScrollToTopStep = z.infer<typeof ScrollToTopStepSchema>;
 export type WaitForStep = z.infer<typeof WaitForStepSchema>;
 export type ExpectedScreen = z.infer<typeof ExpectedScreenSchema>;
 export type ScreenshotStep = z.infer<typeof ScreenshotStepSchema>;

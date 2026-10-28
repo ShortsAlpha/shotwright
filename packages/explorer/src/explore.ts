@@ -6,11 +6,14 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DeviceDriver, Flow, LaunchStep, ScreenInfo, SwipeStep, TapStep, TypeTextStep } from "@shotwright/core";
+import { abortable, isAbortError, throwIfAborted } from "./abort.ts";
 import { nodeAt, normalize, performSwipe, performTap, performType, selectorFor, swipeStepFromPoints, tapStepForNode } from "./actions.ts";
+import { settleCapture, type CaptureSettleOptions } from "./capture.ts";
 import { center, fromGrid, observe, type Observation, type ObservedElement } from "./observe.ts";
 import { addUsage, emptyUsage, type ExplorerProvider, type HistoryItem, type ObservationPayload, type ToolCall, type Usage } from "./providers/types.ts";
-import { FlowRecorder, type RecorderGraph, type ScreenRecord } from "./recorder.ts";
-import { replayFlow, type ReplayCheck } from "./replay.ts";
+import { FlowRecorder, type ActionStep, type RecorderGraph, type ScreenRecord } from "./recorder.ts";
+import { replayFlow, type ReplayCheck, type ReplayStepEvent } from "./replay.ts";
+import { scrollToTop } from "./scroll.ts";
 import { TOOLS, parseToolInput, sanitizeName, type ToolInput } from "./tools.ts";
 
 export interface ExploreOptions {
@@ -32,15 +35,51 @@ export interface ExploreOptions {
   readonly imageScale?: number;
   /** Replay the recorded flow once at the end and repair screens that fail. Default true. */
   readonly verify?: boolean;
+  /**
+   * Capture settling for marked screens (and the verification replay's screenshots): a stable
+   * accessibility tree plus two near-identical screenshots, capped at 4 s. `false` turns it off.
+   */
+  readonly settle?: CaptureSettleOptions | false;
+  /**
+   * Before marking a navigation root whose list an earlier action left scrolled, scroll it back
+   * to the top (recorded as a `scrollToTop` flow step). A swipe right before the mark counts as
+   * deliberate and is kept. Default true.
+   */
+  readonly scrollToTop?: boolean;
   readonly log?: (message: string) => void;
   readonly onEvent?: (event: ExploreEvent) => void;
+  /** After every model turn (with its full log) and after every step of the verification replay. */
+  readonly onStep?: (event: ExploreStepEvent) => void;
+  /**
+   * Stops the run: the loop ends at once (an in-flight model call is abandoned, a device call
+   * finishes), verification is skipped and the result has `stoppedBecause: "aborted"`.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export type ExploreEvent =
   | { readonly kind: "observation"; readonly index: number; readonly title: string | undefined; readonly image: Uint8Array }
-  | { readonly kind: "turn"; readonly turn: number; readonly text: string; readonly calls: ReadonlyArray<{ name: string; args: Record<string, unknown> }> }
+  | {
+      readonly kind: "turn";
+      readonly turn: number;
+      readonly text: string;
+      readonly calls: ReadonlyArray<{ name: string; args: Record<string, unknown> }>;
+      /** The model's reasoning text, when the provider returns it (Spark Open on Baseten). */
+      readonly reasoning?: string;
+      /** This turn's tokens. */
+      readonly usage: Usage;
+      /** Model latency of this turn. */
+      readonly ms: number;
+      /** The run's cost so far, including this turn (USD). */
+      readonly costUsd: number;
+    }
   | { readonly kind: "action"; readonly turn: number; readonly name: string; readonly output: string; readonly reason?: string }
   | { readonly kind: "mark"; readonly name: string; readonly score: number; readonly why: string; readonly png: Uint8Array };
+
+/** `onStep`: a finished model turn, or a step of the verification replay. */
+export type ExploreStepEvent =
+  | { readonly phase: "explore"; readonly step: StepLog }
+  | { readonly phase: "verify"; readonly round: number; readonly step: ReplayStepEvent };
 
 export interface StepLog {
   readonly turn: number;
@@ -67,7 +106,7 @@ export interface ExplorationResult {
   /** Marked screen names, best first (the model's ranking from `done`, else by score). */
   readonly ranked: string[];
   readonly notes: string;
-  readonly stoppedBecause: "done" | "max_steps" | "budget" | "text_replies" | "error";
+  readonly stoppedBecause: "done" | "max_steps" | "budget" | "text_replies" | "error" | "aborted";
   readonly error?: string;
   readonly warnings: string[];
   readonly turns: number;
@@ -85,6 +124,8 @@ export interface ExplorationResult {
     ms: number;
     /** Screens rebuilt from their literal path after the shortcut failed. */
     literal: string[];
+    /** Of those, the ones whose literal path cuts detours to near-identical screens (see BuildOptions.looseLiteral). */
+    looseLiteral?: string[];
     failed: string[];
     screenshots: Array<{ name: string; verified: boolean; checks: ReplayCheck }>;
   };
@@ -125,6 +166,10 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
   const maxScreens = options.maxScreens ?? 8;
   const log = options.log ?? (() => undefined);
   const emit = options.onEvent ?? (() => undefined);
+  const emitStep = (step: StepLog) => options.onStep?.({ phase: "explore", step });
+  const signal = options.signal;
+  const settle = options.settle === false ? undefined : (options.settle ?? {});
+  const scrollBack = options.scrollToTop !== false;
   const out = options.outDir;
   if (out) {
     mkdirSync(join(out, "screens"), { recursive: true });
@@ -159,6 +204,7 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
     emit({ kind: "observation", index: observation.index, title: observation.title, image: observation.image });
   };
 
+  throwIfAborted(signal);
   await timed(() => driver.launch({ bundleId, args: launchArgs }));
   let obs = await timed(() => observe(driver, observeOptions(0)));
   saveStepImage(obs);
@@ -185,9 +231,12 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
   let textReplies = 0;
   let actions = 0;
   let turn = 0;
+  /** The last action that ran (a swipe right before a mark is a deliberate scroll position). */
+  let lastAction: ActionStep | "relaunch" | undefined;
 
   try {
     for (turn = 1; turn <= maxSteps; turn++) {
+      throwIfAborted(signal);
       const spent = provider.cost(usage);
       if (spent >= maxCost) {
         stoppedBecause = "budget";
@@ -197,18 +246,29 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
       if (turn === maxSteps) {
         history.push({ kind: "user", text: "This is your last turn: call done now with the marked screens ranked best first." });
       }
-      const reply = await provider.next({ instructions: system, tools: TOOLS, history });
+      const reply = await abortable(provider.next({ instructions: system, tools: TOOLS, history }), signal);
       modelMs += reply.ms;
       addUsage(usage, reply.usage);
       history.push({ kind: "assistant", text: reply.text, calls: reply.calls });
-      emit({ kind: "turn", turn, text: reply.text, calls: reply.calls.map((c) => ({ name: c.name, args: c.args })) });
+      emit({
+        kind: "turn",
+        turn,
+        text: reply.text,
+        calls: reply.calls.map((c) => ({ name: c.name, args: c.args })),
+        ...(reply.reasoning ? { reasoning: reply.reasoning } : {}),
+        usage: { ...reply.usage },
+        ms: reply.ms,
+        costUsd: provider.cost(usage),
+      });
       log(
         `turn ${turn}: ${reply.calls.map((c) => `${c.name}(${JSON.stringify(c.args)})`).join(" + ") || `text: ${reply.text.slice(0, 120)}`}` +
           ` [${reply.ms} ms, in ${reply.usage.input} (cached ${reply.usage.cachedInput}), out ${reply.usage.output}]`,
       );
 
       if (reply.calls.length === 0) {
-        steps.push({ turn, modelMs: reply.ms, deviceMs: 0, usage: reply.usage, text: reply.text, ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), calls: [] });
+        const textStep: StepLog = { turn, modelMs: reply.ms, deviceMs: 0, usage: reply.usage, text: reply.text, ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), calls: [] };
+        steps.push(textStep);
+        emitStep(textStep);
         if (++textReplies > 3) {
           stoppedBecause = "text_replies";
           break;
@@ -229,6 +289,8 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
       ];
       let acted: { step?: TapStep | SwipeStep | TypeTextStep; relaunch?: boolean } | undefined;
       let finished = false;
+      /** A mark scrolled the list back to its top: refs in the model's observation are stale. */
+      let screenChanged = false;
       const turnDeviceStart = deviceMs;
 
       for (const call of order) {
@@ -243,6 +305,9 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
         const input = parseToolInput(call.name, call.args);
         if ("error" in input) return `Error: ${input.error}`;
         if (input.name === "mark_screen") return markScreen(input);
+        if (screenChanged && ACTIONS.has(input.name)) {
+          return "Not executed: the list was scrolled back to its top for the screenshot, so the element refs changed. Look at the new observation.";
+        }
         if (input.name === "done") {
           finished = true;
           ranked = input.ranked;
@@ -255,23 +320,71 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
         try {
           return await timed(() => act(input));
         } catch (e) {
+          if (isAbortError(e, signal)) throw e;
           return `Action failed: ${(e as Error).message.slice(0, 300)}`;
+        } finally {
+          const done = acted as { step?: ActionStep; relaunch?: boolean };
+          lastAction = done.relaunch ? "relaunch" : (done.step ?? lastAction);
         }
       }
 
-      function markScreen(input: Extract<ToolInput, { name: "mark_screen" }>): string {
+      async function markScreen(input: Extract<ToolInput, { name: "mark_screen" }>): Promise<string> {
         if (!obs.foreground) return "Error: the app is not in the foreground; nothing to mark.";
         if (marks.length >= maxScreens) return `Error: already ${maxScreens} screens marked. Call done.`;
+        // A list root left scrolled by an earlier action (a tab keeps its offset): scroll it back to
+        // the top first, so the screenshot has the large title and no rows cut off under the bars.
+        // A swipe right before the mark is the model choosing this position: keep it.
+        let note = "";
+        let markState = obs.fingerprint;
+        let markIndex = obs.index;
+        let png: Uint8Array | undefined;
+        const deliberate = lastAction !== undefined && lastAction !== "relaunch" && lastAction.action === "swipe" && (lastAction.direction === "up" || lastAction.direction === "down");
+        if (scrollBack && !deliberate && obs.scroll?.root && obs.scroll.list && obs.scroll.scrolled) {
+          const before = obs;
+          // Capture the scrolled screen first: if its top is already marked, the scrolled content is the point.
+          const scrolledPng = settle
+            ? (await timed(() => settleCapture(driver, { bundleId, log, label: `"${input.screenName}" (scrolled)`, ...(signal ? { signal } : {}) }, settle))).png
+            : before.png;
+          const scrolled = await timed(() => scrollToTop(driver, screen, bundleId, { log }));
+          if (scrolled.changed) {
+            obs = await timed(() => observe(driver, observeOptions(before.index + 1)));
+            saveStepImage(obs);
+            recorder.noteState(obs);
+            recorder.recordTransition(before.fingerprint, { action: "scrollToTop" }, obs.fingerprint, before.index);
+            lastAction = { action: "scrollToTop" };
+            screenChanged = true;
+            const twin = recorder.markedTwin(obs.fingerprint);
+            if (twin) {
+              // The top of this list is already marked: keep the position the model chose.
+              markState = before.fingerprint;
+              markIndex = before.index;
+              png = scrolledPng;
+              note = ` Kept the scrolled position (the top of this list is already marked as "${twin.name}"); the screen is now scrolled to the top, see the new observation.`;
+              log(`  kept the scrolled position for the mark: the top of the list is already marked as "${twin.name}"`);
+            } else {
+              markState = obs.fingerprint;
+              markIndex = obs.index;
+              note = " The list was scrolled back to its top first (cleaner screenshot); the new observation follows.";
+              log(`  scrolled the list back to the top before marking (${scrolled.via}, ${scrolled.ms} ms)`);
+            }
+          }
+        }
         const name = sanitizeName(input.screenName, markedNames);
-        const existing = recorder.mark({ name, why: input.why, score: input.score, state: obs.fingerprint, observationIndex: obs.index });
-        if (existing) return `This screen is already marked as "${existing.name}".`;
+        const existing = recorder.mark({ name, why: input.why, score: input.score, state: markState, observationIndex: markIndex });
+        if (existing) return `This screen is already marked as "${existing.name}".${note}`;
+        if (!png && settle) {
+          const capture = await timed(() => settleCapture(driver, { bundleId, log, label: `"${name}"`, ...(signal ? { signal } : {}) }, settle));
+          png = capture.png;
+          if (capture.frames > 2) log(`  capture "${name}": settled after ${capture.frames} screenshots, ${capture.waitedMs} ms`);
+        }
+        png ??= obs.png;
         markedNames.add(name);
         marks.push({ name, score: input.score });
-        markPngs.set(name, obs.png);
-        if (out) writeFileSync(join(out, "screens", `${name}.png`), obs.png);
-        emit({ kind: "mark", name, score: input.score, why: input.why, png: obs.png });
+        markPngs.set(name, png);
+        if (out) writeFileSync(join(out, "screens", `${name}.png`), png);
+        emit({ kind: "mark", name, score: input.score, why: input.why, png });
         log(`  marked "${name}" (${input.score}/10): ${input.why}`);
-        return `Marked "${name}" (score ${input.score}). ${marks.length} screen(s) marked so far.`;
+        return `Marked "${name}" (score ${input.score}). ${marks.length} screen(s) marked so far.${note}`;
       }
 
       async function act(input: Exclude<ToolInput, { name: "mark_screen" } | { name: "done" }>): Promise<string> {
@@ -331,6 +444,7 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
       }
 
       let observation: StepLog["observation"];
+      if (!acted && screenChanged) observation = { index: obs.index, fingerprint: obs.fingerprint, title: obs.title, changed: true };
       if (acted) {
         const before = obs;
         obs = await timed(() => observe(driver, observeOptions(before.index + 1)));
@@ -346,8 +460,8 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
       }
 
       const results = reply.calls.map((c) => ({ callId: c.id, name: c.name, output: outputs.get(c.id) ?? "" }));
-      history.push(acted ? { kind: "results", results, observation: payload(obs) } : { kind: "results", results });
-      steps.push({
+      history.push(acted || screenChanged ? { kind: "results", results, observation: payload(obs) } : { kind: "results", results });
+      const stepLog: StepLog = {
         turn,
         modelMs: reply.ms,
         deviceMs: deviceMs - turnDeviceStart,
@@ -356,16 +470,23 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
         ...(reply.reasoning ? { reasoning: reply.reasoning } : {}),
         calls: reply.calls.map((c) => ({ name: c.name, args: c.args, output: outputs.get(c.id) ?? "" })),
         ...(observation ? { observation } : {}),
-      });
+      };
+      steps.push(stepLog);
+      emitStep(stepLog);
       if (finished) {
         stoppedBecause = "done";
         break;
       }
     }
   } catch (e) {
-    stoppedBecause = "error";
-    error = (e as Error).stack ?? String(e);
-    log(`exploration error: ${error}`);
+    if (isAbortError(e, signal)) {
+      stoppedBecause = "aborted";
+      log("exploration aborted");
+    } else {
+      stoppedBecause = "error";
+      error = (e as Error).stack ?? String(e);
+      log(`exploration error: ${error}`);
+    }
   }
 
   // Ranking: the model's order for known names, then any marked screen it left out, by score.
@@ -378,12 +499,22 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
   const flowName = `${options.appName ?? bundleId} (${provider.id})`;
   let built = recorder.build(flowName, launch);
   let verification: ExplorationResult["verification"];
-  if (options.verify !== false && built.screens.length > 0 && stoppedBecause !== "error") {
+  if (options.verify !== false && built.screens.length > 0 && stoppedBecause !== "error" && stoppedBecause !== "aborted") {
     // Replay once in the exploration's own locale. A shortcut through the graph can miss hidden
     // state; screens that fail are rebuilt from their literal path and checked again.
     const verifyStarted = Date.now();
+    let round = 0;
     const check = async () => {
-      const replay = await timed(() => replayFlow(driver, built.flow, { screens: built.screens, log: (m) => log(`  verify ${m.trim()}`) }));
+      const current = ++round;
+      const replay = await timed(() =>
+        replayFlow(driver, built.flow, {
+          screens: built.screens,
+          log: (m) => log(`  verify ${m.trim()}`),
+          ...(settle ? { settle } : { settle: false as const }),
+          ...(signal ? { signal } : {}),
+          ...(options.onStep ? { onStep: (step: ReplayStepEvent) => options.onStep?.({ phase: "verify", round: current, step }) } : {}),
+        }),
+      );
       const verified = new Set(replay.screenshots.filter((s) => s.verified).map((s) => s.name));
       return { replay, failed: built.screens.map((s) => s.name).filter((n) => !verified.has(n)) };
     };
@@ -391,18 +522,34 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
     let { replay, failed } = await check();
     let rounds = 1;
     const literal = new Set<string>();
-    if (failed.length > 0) {
-      for (const name of failed) literal.add(name);
-      log(`  ${failed.join(", ")} failed; rebuilding from the literal path`);
-      built = recorder.build(flowName, launch, { literal });
-      ({ replay, failed } = await check());
-      rounds++;
+    const loose = new Set<string>();
+    if (replay.aborted) stoppedBecause = "aborted";
+    else if (failed.length > 0) {
+      // Rebuild failing screens from their literal path: first with detours to near-identical
+      // screens cut out (shorter replays), then, if that still fails, exactly as explored.
+      for (const mode of ["loose", "exact"] as const) {
+        for (const name of failed) {
+          literal.add(name);
+          if (mode === "loose") loose.add(name);
+          else loose.delete(name);
+        }
+        log(`  ${failed.join(", ")} failed; rebuilding from the ${mode} literal path`);
+        built = recorder.build(flowName, launch, { literal, looseLiteral: loose });
+        ({ replay, failed } = await check());
+        rounds++;
+        if (replay.aborted) {
+          stoppedBecause = "aborted";
+          break;
+        }
+        if (failed.length === 0) break;
+      }
     }
     if (failed.length > 0) warnings.push(`still failing after verification: ${failed.join(", ")}`);
     verification = {
       rounds,
       ms: Date.now() - verifyStarted,
       literal: [...literal],
+      ...(loose.size > 0 ? { looseLiteral: [...loose] } : {}),
       failed,
       screenshots: replay.screenshots.map((s) => ({ name: s.name, verified: s.verified, checks: s.checks })),
     };
