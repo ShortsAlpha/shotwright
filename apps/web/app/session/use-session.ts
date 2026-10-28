@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentParams, AgentResult, Frame } from "@shotwright/core";
+import { EMPTY_JOBS, applyJobEvent, type JobAction, type JobsSnapshot } from "../../lib/jobs/state.ts";
 import {
   CLOSE_SESSION_NOT_FOUND,
   type LogEntry,
@@ -14,11 +15,16 @@ export type SocketStatus = "connecting" | "open" | "reconnecting" | "ended";
 
 export type CallFn = <M extends UiMethod>(method: M, params: AgentParams<M>) => Promise<AgentResult<M>>;
 
+/** Starts an exploration or a replay, or cancels the running job. */
+export type JobFn = (action: JobAction, params?: unknown) => Promise<unknown>;
+
 export interface SessionApi {
   readonly status: SocketStatus;
   readonly state: SessionState | null;
   readonly logs: readonly LogEntry[];
+  readonly jobs: JobsSnapshot;
   readonly call: CallFn;
+  readonly job: JobFn;
   /** Frames bypass React state; the live view draws them straight into an <img>. */
   readonly subscribeFrames: (listener: (frame: Frame) => void) => () => void;
   readonly clearLogs: () => void;
@@ -31,6 +37,7 @@ export function useSession(): SessionApi {
   const [status, setStatus] = useState<SocketStatus>("connecting");
   const [state, setState] = useState<SessionState | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [jobs, setJobs] = useState<JobsSnapshot>(EMPTY_JOBS);
   const socket = useRef<WebSocket | null>(null);
   const pending = useRef(new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>());
   const frameListeners = useRef(new Set<(frame: Frame) => void>());
@@ -61,6 +68,12 @@ export function useSession(): SessionApi {
             break;
           case "state":
             setState(message.state);
+            break;
+          case "jobs":
+            setJobs(message.snapshot);
+            break;
+          case "job.event":
+            setJobs((previous) => applyJobEvent(previous, message.event));
             break;
           case "log":
             setLogs((previous) => {
@@ -103,15 +116,22 @@ export function useSession(): SessionApi {
     };
   }, []);
 
-  const call = useCallback<CallFn>((method, params) => {
+  const send = useCallback((message: Record<string, unknown>): Promise<unknown> => {
     const ws = socket.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Not connected to the server"));
     const id = `b${nextId.current++}`;
     return new Promise((resolve, reject) => {
-      pending.current.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      ws.send(JSON.stringify({ type: "call", id, method, params }));
+      pending.current.set(id, { resolve, reject });
+      ws.send(JSON.stringify({ ...message, id }));
     });
   }, []);
+
+  const call = useCallback<CallFn>(
+    (method, params) => send({ type: "call", method, params }) as Promise<AgentResult<typeof method>>,
+    [send],
+  );
+
+  const job = useCallback<JobFn>((action, params) => send({ type: "job", action, params }), [send]);
 
   const subscribeFrames = useCallback((listener: (frame: Frame) => void) => {
     frameListeners.current.add(listener);
@@ -122,5 +142,5 @@ export function useSession(): SessionApi {
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
-  return { status, state, logs, call, subscribeFrames, clearLogs };
+  return { status, state, logs, jobs, call, job, subscribeFrames, clearLogs };
 }

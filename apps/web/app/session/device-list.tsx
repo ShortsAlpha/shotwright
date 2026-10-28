@@ -22,7 +22,18 @@ function StateDot({ state, busy }: { state: string; busy: boolean }) {
   return <span className={`inline-block size-2 rounded-full ${color}`} />;
 }
 
-export function DeviceList({ state, actions }: { state: SessionState; actions: DeviceActions }) {
+export function DeviceList({
+  state,
+  actions,
+  locked = false,
+  className = "",
+}: {
+  state: SessionState;
+  actions: DeviceActions;
+  /** A job is driving the simulator: no boot, shutdown or reconnect. */
+  locked?: boolean;
+  className?: string;
+}) {
   const [showAll, setShowAll] = useState(false);
   const devices = state.devices ?? [];
   const featured = devices.filter((d) => d.setId !== undefined || d.state !== "Shutdown" || d.udid === state.activeUdid);
@@ -33,7 +44,7 @@ export function DeviceList({ state, actions }: { state: SessionState; actions: D
   const offline = !state.agent.connected;
 
   return (
-    <section className="flex min-h-0 flex-col rounded-2xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
+    <section className={`flex min-h-0 flex-col rounded-2xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900 ${className}`}>
       <header className="flex items-center justify-between border-b border-neutral-100 px-4 py-3 dark:border-neutral-800">
         <h2 className="text-sm font-semibold">Simulators</h2>
         <button
@@ -58,7 +69,7 @@ export function DeviceList({ state, actions }: { state: SessionState; actions: D
               device={device}
               active={device.udid === state.activeUdid}
               busy={busyFor(device.udid)}
-              disabled={offline}
+              disabled={offline || locked}
               actions={actions}
             />
           ))}

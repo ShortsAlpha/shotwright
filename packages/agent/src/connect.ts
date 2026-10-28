@@ -28,6 +28,8 @@ export interface ConnectOptions {
 /** Close codes the server uses for errors that reconnecting cannot fix. */
 const FATAL_CLOSE_CODES = new Set([4426]);
 const MAX_BUFFERED_BYTES = 256 * 1024;
+/** Calls an exploration makes many times a minute; not printed on success. */
+const QUIET_METHODS = new Set(["driver.screenshot", "driver.screen", "driver.source", "driver.waitForStable"]);
 const tty = process.stdout.isTTY;
 const bold = (s: string) => (tty ? `\x1b[1m${s}\x1b[22m` : s);
 const dim = (s: string) => (tty ? `\x1b[2m${s}\x1b[22m` : s);
@@ -86,6 +88,7 @@ export function connect(options: ConnectOptions): Promise<number> {
       factory: driverFactory(options.driver),
       log,
       projectsRoot: options.projectsRoot,
+      fakeBuilds: options.driver === "fake",
       sink: {
         ready: () => isOpen() && socket!.bufferedAmount < MAX_BUFFERED_BYTES,
         send: (frame) => send(frame),
@@ -98,7 +101,7 @@ export function connect(options: ConnectOptions): Promise<number> {
         if (!handlers.has(call.method)) throw new AgentError(`Unknown method: ${call.method}`, "unknown_method");
         const value = await handlers.dispatch(call.method, call.params);
         send({ type: "result", id: call.id, ok: true, value: value ?? null });
-        if (call.method !== "driver.screenshot" && call.method !== "driver.screen") {
+        if (!QUIET_METHODS.has(call.method)) {
           console.log(`${dim(time())} ${call.method} ${dim(`ok, ${Date.now() - started} ms`)}`);
         }
       } catch (error) {

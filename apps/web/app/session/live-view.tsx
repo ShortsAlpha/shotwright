@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import type { Frame } from "@shotwright/core";
 import type { SessionState } from "../../lib/ui-protocol.ts";
-import { HomeIcon, PlayIcon, Spinner, StopIcon } from "../_components/icons.tsx";
+import { HomeIcon, PlayIcon, SparkleIcon, Spinner, StopIcon } from "../_components/icons.tsx";
 import type { SessionApi } from "./use-session.ts";
 
 /** Pixels the pointer may move and still count as a tap rather than a swipe. */
@@ -13,6 +13,8 @@ const STREAM_MAX_WIDTH = 720;
 
 interface Ripple {
   readonly id: number;
+  /** The agent's tap rather than the user's. */
+  readonly agent?: boolean;
   /** Position as a fraction of the screen. */
   readonly fx: number;
   readonly fy: number;
@@ -32,10 +34,16 @@ const iconButton =
 export function LiveView({
   session,
   state,
+  driving = false,
+  agentTouch,
   onError,
 }: {
   session: Pick<SessionApi, "call" | "subscribeFrames">;
   state: SessionState;
+  /** The agent is exploring or replaying: show it, and keep clicks from interfering. */
+  driving?: boolean;
+  /** The agent's latest tap in points; each new one draws a ripple. */
+  agentTouch?: { readonly x: number; readonly y: number; readonly at: number } | undefined;
   onError: (error: unknown) => void;
 }) {
   const { call, subscribeFrames } = session;
@@ -50,7 +58,7 @@ export function LiveView({
 
   const device = state.devices?.find((d) => d.udid === state.activeUdid);
   const screen = state.screen;
-  const interactive = state.streaming && state.agent.connected && screen !== null && frameSize !== null;
+  const interactive = !driving && state.streaming && state.agent.connected && screen !== null && frameSize !== null;
 
   // Draw frames straight into the <img>, outside React rendering.
   useEffect(
@@ -74,6 +82,15 @@ export function LiveView({
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Show where the agent taps. Frames arrive a moment later, so the ripple lingers a little longer.
+  useEffect(() => {
+    if (!agentTouch || !screen) return;
+    const id = ++rippleId.current;
+    setRipples((list) => [...list, { id, agent: true, fx: agentTouch.x / screen.width, fy: agentTouch.y / screen.height }]);
+    const timer = setTimeout(() => setRipples((list) => list.filter((r) => r.id !== id)), 1100);
+    return () => clearTimeout(timer);
+  }, [agentTouch, screen]);
 
   // A different simulator (or none): forget the old picture.
   useEffect(() => {
@@ -161,6 +178,11 @@ export function LiveView({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {driving && (
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+              <SparkleIcon className="size-3" /> Agent driving
+            </span>
+          )}
           {state.streaming && (
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-600 tabular-nums dark:bg-red-950/50 dark:text-red-400">
               <span className="size-1.5 animate-pulse rounded-full bg-red-500" /> LIVE · {fps.toFixed(1)} fps
@@ -206,7 +228,9 @@ export function LiveView({
             {ripples.map((r) => (
               <span
                 key={r.id}
-                className="tap-ripple pointer-events-none absolute size-10 rounded-full border-2 border-white bg-white/30"
+                className={`pointer-events-none absolute size-10 rounded-full border-2 ${
+                  r.agent ? "agent-ripple border-indigo-400 bg-indigo-500/25" : "tap-ripple border-white bg-white/30"
+                }`}
                 style={{ left: `${r.fx * 100}%`, top: `${r.fy * 100}%` }}
               />
             ))}
@@ -215,7 +239,11 @@ export function LiveView({
       </div>
 
       <footer className="border-t border-neutral-100 px-4 py-2.5 text-xs text-neutral-500 dark:border-neutral-800">
-        {interactive ? (lastInput ?? "Click to tap, drag to swipe.") : "Click the screen to tap once the live view is running."}
+        {driving
+          ? "The agent is driving the simulator. Stop it to take over."
+          : interactive
+            ? (lastInput ?? "Click to tap, drag to swipe.")
+            : "Click the screen to tap once the live view is running."}
       </footer>
     </section>
   );

@@ -11,7 +11,7 @@ const LEVEL_TEXT: Record<LogEntry["level"], string> = {
 
 const time = (ts: number) => new Date(ts).toLocaleTimeString([], { hour12: false });
 
-export function LogPanel({ logs, onClear }: { logs: readonly LogEntry[]; onClear: () => void }) {
+export function LogPanel({ logs, onClear, className = "" }: { logs: readonly LogEntry[]; onClear: () => void; className?: string }) {
   const list = useRef<HTMLOListElement>(null);
   const pinned = useRef(true);
 
@@ -22,7 +22,7 @@ export function LogPanel({ logs, onClear }: { logs: readonly LogEntry[]; onClear
   }, [logs]);
 
   return (
-    <section className="flex min-h-0 flex-col rounded-2xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
+    <section className={`flex min-h-0 flex-col rounded-2xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900 ${className}`}>
       <header className="flex items-center justify-between border-b border-neutral-100 px-4 py-3 dark:border-neutral-800">
         <h2 className="text-sm font-semibold">Activity</h2>
         <button type="button" onClick={onClear} className="text-xs font-medium text-neutral-500 hover:text-neutral-900 dark:hover:text-white">
@@ -35,7 +35,7 @@ export function LogPanel({ logs, onClear }: { logs: readonly LogEntry[]; onClear
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
-        className="min-h-48 flex-1 space-y-1 overflow-y-auto px-4 py-3 font-mono text-[11.5px] leading-relaxed"
+        className="min-h-32 flex-1 space-y-1 overflow-y-auto px-4 py-3 font-mono text-[11.5px] leading-relaxed"
       >
         {logs.length === 0 && <li className="text-neutral-400">Nothing yet.</li>}
         {logs.map((entry) => (

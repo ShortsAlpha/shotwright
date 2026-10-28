@@ -2,9 +2,10 @@
  * The driver seam: `runner.ensure` and every `driver.*` call go through a DeviceDriver that a
  * DriverFactory creates for one simulator. Wire the runner-backed driver in `createRunnerDriver`.
  */
-import type { DeviceDriver, SimDevice } from "@shotwright/core";
+import type { DeviceDriver, SimDevice, UISnapshot } from "@shotwright/core";
 import { createFakeDriver } from "./fake-driver.ts";
 import { ensureRunner } from "./runner/index.ts";
+import { setStatusBar } from "./simctl.ts";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -14,6 +15,10 @@ export type AgentLogger = (level: LogLevel, message: string) => void;
 /** A DeviceDriver the agent owns. `close` releases whatever the driver started. */
 export interface AgentDriver extends DeviceDriver {
   close?(): Promise<void>;
+  /** Waits for a stable layout on the Mac; `driver.waitForStable` polls `source()` when missing. */
+  waitForStable?(options: { bundleId?: string; timeoutMs?: number }): Promise<UISnapshot>;
+  /** App Store status bar on (true) or off; a no-op when missing. */
+  statusBar?(override: boolean): Promise<void>;
 }
 
 export interface DriverContext {
@@ -50,6 +55,8 @@ const createRunnerDriver: DriverFactory = async ({ udid, log }) => {
     tap: (target) => driver.tap(target),
     swipe: (gesture) => driver.swipe(gesture),
     typeText: (text, into) => driver.typeText(text, into),
+    waitForStable: (options) => driver.waitForStable(options),
+    statusBar: (override) => setStatusBar(udid, override),
     close: () => handle.stop(),
   };
 };

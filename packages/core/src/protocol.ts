@@ -50,8 +50,15 @@ export interface AgentMethods {
   "driver.terminate": { params: { bundleId?: string }; result: null };
   "driver.home": { params: Record<string, never>; result: null };
   "driver.source": { params: { bundleId?: string }; result: UISnapshot };
+  /**
+   * Polls the source on the Mac until the layout stops changing (or `timeoutMs`, default 10 s) and
+   * returns the last snapshot. Saves the explorer one round trip per poll.
+   */
+  "driver.waitForStable": { params: { bundleId?: string; timeoutMs?: number }; result: UISnapshot };
   /** Base64 PNG, no alpha. */
   "driver.screenshot": { params: Record<string, never>; result: { png: string } };
+  /** `override: true` sets the App Store status bar (9:41, full battery); false clears it. */
+  "driver.statusBar": { params: { override: boolean }; result: null };
   "driver.tap": { params: TapTarget; result: null };
   "driver.swipe": { params: SwipeGesture; result: null };
   "driver.typeText": { params: { text: string; into?: ElementSelector }; result: null };

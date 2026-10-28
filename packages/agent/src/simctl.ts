@@ -77,3 +77,18 @@ export async function shutdownDevice(udid: string): Promise<void> {
 export async function installApp(udid: string, appPath: string): Promise<void> {
   await run("xcrun", ["simctl", "install", udid, appPath], { timeoutMs: 300_000 });
 }
+
+/** The App Store status bar: 9:41, full battery, full signal, no carrier name. */
+const STATUS_BAR_OVERRIDE = [
+  "--time", "9:41",
+  "--batteryState", "discharging", "--batteryLevel", "100",
+  "--dataNetwork", "5g", "--wifiBars", "3",
+  "--cellularMode", "active", "--cellularBars", "4",
+  "--operatorName", "",
+];
+
+/** Sets (`override`) or clears the status bar override on a booted simulator. */
+export async function setStatusBar(udid: string, override: boolean): Promise<void> {
+  const args = override ? ["override", ...STATUS_BAR_OVERRIDE] : ["clear"];
+  await run("xcrun", ["simctl", "status_bar", udid, ...args], { timeoutMs: 20_000 });
+}

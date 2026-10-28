@@ -1,10 +1,13 @@
 /**
  * A paired session: one agent connection (replaced on reconnect), any number of browser sockets,
- * a log buffer and the state the UI shows. Every call to the agent goes through `call`.
+ * a log buffer, the state the UI shows and its explore/replay jobs. Every call to the agent goes
+ * through `call`.
  */
 import type { WebSocket } from "ws";
 import type { AgentMethod, AgentParams, AgentResult, Hello, ScreenInfo, SimDevice } from "@shotwright/core";
+import { SessionJobs } from "../jobs/manager.ts";
 import {
+  BLOCKED_DURING_JOBS,
   UI_METHODS,
   type LogEntry,
   type SessionState,
@@ -13,6 +16,7 @@ import {
   type UiServerMessage,
 } from "../ui-protocol.ts";
 import { RpcError, type AgentConnection } from "./agent-connection.ts";
+import { RemoteDriver } from "./remote-driver.ts";
 
 const MAX_LOGS = 300;
 /** Frames are skipped for a browser that still has this much unsent data. */
@@ -59,9 +63,30 @@ export class Session {
   private nextBusyId = 1;
   private agentWaiters: (() => void)[] = [];
   private streamStopTimer: NodeJS.Timeout | undefined;
+  readonly jobs: SessionJobs;
 
   constructor(id: string) {
     this.id = id;
+    const session = this;
+    this.jobs = new SessionJobs({
+      sessionId: id,
+      get agentConnected() {
+        return session.agent !== null;
+      },
+      call: async (method, params) => {
+        try {
+          return await this.call(method, params, { waitForAgentMs: 20_000 });
+        } finally {
+          // runner.ensure boots a shut-down simulator.
+          if (method === "runner.ensure") void this.refreshDevices();
+        }
+      },
+      driver: () => new RemoteDriver(this),
+      device: (udid) => this.devices?.find((d) => d.udid === udid),
+      startLiveView: () => this.startLiveView(),
+      log: (level, message) => this.log("server", level, message),
+      emit: (event) => this.broadcast({ type: "job.event", event }),
+    });
   }
 
   // --- State ----------------------------------------------------------------
@@ -206,6 +231,16 @@ export class Session {
     this.pushState();
   }
 
+  /**
+   * Starts the live view (as the browser's Start button does) when someone is watching and it is not
+   * running yet. Frames compete with a job's own screenshots on the runner, so not for an empty room.
+   */
+  async startLiveView(params: AgentParams<"stream.start"> = { fps: 4, maxWidth: 720 }): Promise<void> {
+    if (this.streaming || this.uiSockets.size === 0) return;
+    this.wantedStream = params;
+    await this.call("stream.start", params);
+  }
+
   private async startStream(params: AgentParams<"stream.start">): Promise<void> {
     try {
       await this.call("stream.start", params);
@@ -230,6 +265,7 @@ export class Session {
     const send = (message: UiServerMessage) => ws.send(JSON.stringify(message));
     send({ type: "state", state: this.state });
     send({ type: "log", entries: this.logs });
+    send({ type: "jobs", snapshot: this.jobs.snapshot });
     if (this.lastFrame && this.streaming) ws.send(this.lastFrame);
     if (this.wantedStream && !this.streaming && this.agent && this.activeUdid) void this.startStream(this.wantedStream);
 
@@ -254,22 +290,39 @@ export class Session {
   }
 
   private async onUiMessage(ws: WebSocket, text: string): Promise<void> {
-    let message: { type?: unknown; id?: unknown; method?: unknown; params?: unknown };
+    let message: { type?: unknown; id?: unknown; method?: unknown; action?: unknown; params?: unknown };
     try {
       message = JSON.parse(text) as typeof message;
     } catch {
       return;
     }
-    if (message.type !== "call" || typeof message.id !== "string" || message.id.length > 64) return;
+    if ((message.type !== "call" && message.type !== "job") || typeof message.id !== "string" || message.id.length > 64) return;
     const reply = (result: Omit<UiResult, "type" | "id">) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "result", id: message.id, ...result }));
     };
+    if (message.type === "job") {
+      try {
+        let value: unknown = null;
+        if (message.action === "explore") value = this.jobs.startExplore(message.params);
+        else if (message.action === "replay") value = this.jobs.startReplay(message.params);
+        else if (message.action === "cancel") value = this.jobs.cancel();
+        else throw new Error(`Unknown job action: ${String(message.action)}`);
+        reply({ ok: true, value });
+      } catch (error) {
+        reply({ ok: false, error: { message: error instanceof Error ? error.message : String(error), code: "bad_request" } });
+      }
+      return;
+    }
     if (typeof message.method !== "string" || !(UI_METHODS as readonly string[]).includes(message.method)) {
       reply({ ok: false, error: { message: `Unknown method: ${String(message.method)}`, code: "bad_request" } });
       return;
     }
     const method = message.method as UiMethod;
     const params = (message.params ?? {}) as AgentParams<UiMethod>;
+    if (this.jobs.active && BLOCKED_DURING_JOBS.has(method)) {
+      reply({ ok: false, error: { message: "The agent is driving the simulator. Stop the job first.", code: "busy" } });
+      return;
+    }
     try {
       const value = await this.callFromUi(method, params);
       reply({ ok: true, value });
@@ -309,6 +362,7 @@ export class Session {
   }
 
   close(code = 4410, reason = "Session ended"): void {
+    this.jobs.close();
     this.agent?.close(code, reason);
     for (const ws of this.uiSockets) ws.close(1001, reason);
   }

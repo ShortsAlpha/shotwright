@@ -1,8 +1,9 @@
 /** Implements every `AgentMethods` call the server can make. */
-import { resolve } from "node:path";
-import type { AgentMethod, AgentResult, ScreenInfo } from "@shotwright/core";
+import { join, resolve } from "node:path";
+import type { AgentMethod, AgentResult, DeviceDriver, ScreenInfo, UISnapshot, XcodeProject } from "@shotwright/core";
 import type { AgentDriver, AgentLogger, DriverFactory } from "./drivers.ts";
 import * as p from "./params.ts";
+import { layoutHash } from "./runner/stable.ts";
 import { bootDevice, installApp, listDevices, shutdownDevice } from "./simctl.ts";
 import { DEFAULT_FPS, DEFAULT_MAX_WIDTH, Streamer, type FrameSink } from "./stream.ts";
 import { buildApp, listProjects } from "./xcode.ts";
@@ -16,6 +17,28 @@ export interface HandlerOptions {
   readonly sink: FrameSink;
   /** Default folder for `projects.list`. */
   readonly projectsRoot: string;
+  /**
+   * Simulate `app.build` and `app.install` (with `--fake`): no xcodebuild, no simctl, and a sample
+   * project at the top of `projects.list`, so the whole explore flow can be tried without Xcode.
+   */
+  readonly fakeBuilds?: boolean;
+}
+
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/** `driver.waitForStable` for drivers without their own: polls `source()` until two snapshots match. */
+async function pollStable(driver: DeviceDriver, bundleId: string | undefined, timeoutMs: number): Promise<UISnapshot> {
+  const started = Date.now();
+  let snapshot = await driver.source(bundleId);
+  let last = layoutHash(snapshot.tree);
+  while (Date.now() - started < timeoutMs) {
+    await sleep(300);
+    snapshot = await driver.source(bundleId);
+    const hash = layoutHash(snapshot.tree);
+    if (hash === last) break;
+    last = hash;
+  }
+  return snapshot;
 }
 
 export class Handlers {
@@ -24,12 +47,14 @@ export class Handlers {
   /** Serializes runner.ensure so two calls never start two drivers. */
   private ensureChain: Promise<unknown> = Promise.resolve();
   private readonly options: HandlerOptions;
+  /** App launches in progress; the live view holds its captures meanwhile. */
+  private launching = 0;
   readonly streamer: Streamer;
   private readonly table: HandlerTable;
 
   constructor(options: HandlerOptions) {
     this.options = options;
-    this.streamer = new Streamer(() => this.driver, options.sink, options.log);
+    this.streamer = new Streamer(() => this.driver, options.sink, options.log, () => this.launching > 0);
     this.table = this.createTable();
   }
 
@@ -102,9 +127,26 @@ export class Handlers {
       },
       "projects.list": async (params) => {
         const root = p.optStr(p.asObject(params), "root");
-        return listProjects(root ? resolve(root.replace(/^~(?=$|\/)/, process.env.HOME ?? "~")) : this.options.projectsRoot, log);
+        const folder = root ? resolve(root.replace(/^~(?=$|\/)/, process.env.HOME ?? "~")) : this.options.projectsRoot;
+        const projects = await listProjects(folder, log);
+        if (!this.options.fakeBuilds) return projects;
+        const sample: XcodeProject = { path: join(folder, "FakeApp.xcodeproj"), schemes: ["FakeApp"] };
+        return [sample, ...projects];
       },
       "app.build": async (params) => {
+        if (this.options.fakeBuilds) {
+          const obj = p.asObject(params);
+          const scheme = p.arg(obj, "scheme");
+          p.udid(params);
+          log("info", `Building ${scheme} (Debug) from ${p.str(obj, "projectPath").split("/").pop()} (simulated)`);
+          for (let s = 1; s <= 3; s++) {
+            await sleep(1000);
+            log("info", `Still building (${s} s)`);
+          }
+          log("info", "Build succeeded in 3 s (simulated)");
+          const slug = scheme.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+          return { appPath: `/tmp/shotwright-fake/${scheme}.app`, bundleId: `com.example.${slug}` };
+        }
         const obj = p.asObject(params);
         const configuration = p.optStr(obj, "configuration") ?? "Debug";
         if (configuration !== "Debug" && configuration !== "Release") {
@@ -121,6 +163,11 @@ export class Handlers {
         );
       },
       "app.install": async (params) => {
+        if (this.options.fakeBuilds) {
+          p.udid(params);
+          await sleep(500);
+          return null;
+        }
         await installApp(p.udid(params), p.absolutePath(p.asObject(params), "appPath", [".app"]));
         return null;
       },
@@ -141,7 +188,15 @@ export class Handlers {
       },
       "driver.screen": () => this.requireDriver().screen(),
       "driver.launch": async (params) => {
-        await this.requireDriver().launch(p.launchOptions(params));
+        const driver = this.requireDriver();
+        const options = p.launchOptions(params);
+        // A live-view screenshot while the app starts can block the runner until it is restarted.
+        this.launching++;
+        try {
+          await driver.launch(options);
+        } finally {
+          this.launching--;
+        }
         return null;
       },
       "driver.terminate": async (params) => {
@@ -153,9 +208,26 @@ export class Handlers {
         return null;
       },
       "driver.source": (params) => this.requireDriver().source(p.optStr(p.asObject(params), "bundleId")),
+      "driver.waitForStable": async (params) => {
+        const obj = p.asObject(params);
+        const bundleId = p.optStr(obj, "bundleId");
+        const timeoutMs = p.optNum(obj, "timeoutMs", 0, 120_000);
+        const driver = this.requireDriver();
+        if (driver.waitForStable) {
+          return driver.waitForStable({ ...(bundleId !== undefined && { bundleId }), ...(timeoutMs !== undefined && { timeoutMs }) });
+        }
+        return pollStable(driver, bundleId, timeoutMs ?? 10_000);
+      },
       "driver.screenshot": async () => {
         const png = await this.requireDriver().screenshot();
+        this.streamer.offer(png);
         return { png: Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64") };
+      },
+      "driver.statusBar": async (params) => {
+        const override = p.asObject(params).override;
+        if (typeof override !== "boolean") throw new p.AgentError('"override" must be true or false');
+        await this.requireDriver().statusBar?.(override);
+        return null;
       },
       "driver.tap": async (params) => {
         await this.requireDriver().tap(p.tapTarget(params));

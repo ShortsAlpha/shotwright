@@ -23,7 +23,15 @@ export class RpcError extends Error {
   }
 }
 
-/** Per-call timeouts. Builds and the first runner start are slow; driver calls should be quick. */
+/**
+ * Per-call timeouts: backstops above the agent's own worst case, so the server never gives up on a
+ * call the Mac is still finishing. Builds and the first runner start are slow. Driver calls are
+ * usually quick (a tap right after an app launch took 6.9 s), but the runner driver on the Mac
+ * waits up to 20 s for a tap, 30 s for a source and 10 s for a screenshot, then spends up to 15 s
+ * deciding whether the runner hung and restarts it (5-30 s) before retrying a read once. A tap also
+ * waits for the layout to settle. If the server timed out first, the explorer would fire its next
+ * call into a runner that is still restarting.
+ */
 export const CALL_TIMEOUTS_MS: Readonly<Record<AgentMethod, number>> = {
   "devices.list": 30_000,
   "device.boot": 300_000,
@@ -35,14 +43,17 @@ export const CALL_TIMEOUTS_MS: Readonly<Record<AgentMethod, number>> = {
   "stream.start": 15_000,
   "stream.stop": 15_000,
   "driver.screen": 30_000,
-  "driver.launch": 120_000,
+  // simctl launch (60 s) plus 1.5 s of layout stability (up to 30 s).
+  "driver.launch": 180_000,
   "driver.terminate": 30_000,
-  "driver.home": 30_000,
-  "driver.source": 60_000,
-  "driver.screenshot": 30_000,
-  "driver.tap": 30_000,
-  "driver.swipe": 30_000,
-  "driver.typeText": 60_000,
+  "driver.home": 60_000,
+  "driver.source": 120_000,
+  "driver.waitForStable": 120_000,
+  "driver.screenshot": 90_000,
+  "driver.tap": 120_000,
+  "driver.swipe": 120_000,
+  "driver.typeText": 120_000,
+  "driver.statusBar": 30_000,
 };
 
 const HELLO_TIMEOUT_MS = 10_000;

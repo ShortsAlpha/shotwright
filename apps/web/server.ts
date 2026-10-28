@@ -3,17 +3,31 @@
  *   /agent      Mac agents (packages/core/src/protocol.ts)
  *   /ui         browsers (lib/ui-protocol.ts), authenticated by the session cookie
  *   /api/pair   POST { code } -> { sessionId } and sets the session cookie
+ *   /api/artifacts/<runId>/<path>   GET a run file of the cookie's session (lib/jobs/artifacts.ts)
  * Everything else goes to Next.js, including its dev-mode HMR socket.
+ *
+ * Model keys (MUSE_API_KEY, BASETEN_API_KEY) come from the environment or the repo's .env.local.
+ * SHOTWRIGHT_FAKE_MODELS=1 scripts the model turns and the judge (no keys needed; for the fake agent).
  *
  *   npm run dev                  # tsx server.ts, Next in dev mode, port 3000 (PORT to change)
  *   npm run build && npm start   # production
  */
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
+import { fileURLToPath } from "node:url";
 import next from "next";
 import { WebSocketServer } from "ws";
+import { artifactPath } from "./lib/jobs/artifacts.ts";
 import { getHub } from "./lib/realtime/hub.ts";
 import { SESSION_COOKIE } from "./lib/ui-protocol.ts";
+
+try {
+  process.loadEnvFile(fileURLToPath(new URL("../../.env.local", import.meta.url)));
+} catch {
+  // Keys may come from the environment instead.
+}
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -75,6 +89,45 @@ async function handlePair(req: IncomingMessage, res: ServerResponse): Promise<vo
   });
 }
 
+const CONTENT_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", json: "application/json" };
+
+/** GET /api/artifacts/<runId>/<path>: a file from the session's run folder. */
+async function handleArtifact(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    json(res, 405, { error: "Use GET" }, { allow: "GET" });
+    return;
+  }
+  const sessionId = readCookie(req, SESSION_COOKIE) ?? url.searchParams.get("session") ?? "";
+  if (!getHub().getSession(sessionId)) {
+    json(res, 404, { error: "Not found" });
+    return;
+  }
+  let segments: string[];
+  try {
+    segments = url.pathname.slice("/api/artifacts/".length).split("/").map((s) => decodeURIComponent(s));
+  } catch {
+    segments = [];
+  }
+  const [runId = "", ...rest] = segments;
+  const file = artifactPath(sessionId, runId, rest.join("/"));
+  const info = file ? await stat(file).catch(() => null) : null;
+  if (!file || !info?.isFile()) {
+    json(res, 404, { error: "Not found" });
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": CONTENT_TYPES[file.split(".").pop() ?? ""] ?? "application/octet-stream",
+    "content-length": info.size,
+    // Versioned URLs (?v=) never change; others may be rewritten by a later replay.
+    "cache-control": url.searchParams.has("v") ? "private, max-age=86400, immutable" : "private, no-cache",
+  });
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  createReadStream(file).pipe(res);
+}
+
 /** Browsers send Origin on WebSocket handshakes; only accept our own site. */
 function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
@@ -100,7 +153,14 @@ async function main(): Promise<void> {
   const uiSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   const server = createServer((req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    if (path.startsWith("/api/artifacts/")) {
+      handleArtifact(req, res, new URL(req.url ?? "/", "http://localhost")).catch((error: unknown) => {
+        console.error(error);
+        if (!res.headersSent) json(res, 500, { error: "Internal error" });
+      });
+      return;
+    }
     if (path === "/api/pair") {
       handlePair(req, res).catch((error: unknown) => {
         console.error(error);

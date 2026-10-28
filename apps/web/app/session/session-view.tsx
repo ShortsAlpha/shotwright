@@ -2,12 +2,17 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isActive } from "../../lib/jobs/state.ts";
 import type { SessionState } from "../../lib/ui-protocol.ts";
 import { Logo } from "../_components/icons.tsx";
 import { AGENT_COMMAND } from "../_components/pair-form.tsx";
+import { AgentPanel } from "./agent-panel.tsx";
 import { DeviceList, type DeviceActions } from "./device-list.tsx";
+import { useExploreForm } from "./explore-form.ts";
 import { LiveView } from "./live-view.tsx";
 import { LogPanel } from "./log-panel.tsx";
+import { ProjectPanel } from "./project-panel.tsx";
+import { Results } from "./results.tsx";
 import { useSession, type SocketStatus } from "./use-session.ts";
 
 function AgentStatus({ status, state }: { status: SocketStatus; state: SessionState | null }) {
@@ -38,8 +43,10 @@ function AgentStatus({ status, state }: { status: SocketStatus; state: SessionSt
 
 export function SessionView() {
   const session = useSession();
-  const { status, state, logs, call, clearLogs } = session;
+  const { status, state, logs, jobs, call, job, clearLogs } = session;
   const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useExploreForm();
+  const driving = isActive(jobs.job);
   const requestedDevices = useRef(false);
 
   const onError = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), []);
@@ -85,7 +92,7 @@ export function SessionView() {
 
   return (
     <div className="flex min-h-screen flex-col bg-neutral-100/70 dark:bg-neutral-950">
-      <header className="flex items-center justify-between gap-4 border-b border-neutral-200 bg-white/80 px-5 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/80">
+      <header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-neutral-200 bg-white/80 px-5 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/80">
         <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
           <Logo className="text-indigo-600" /> Shotwright
         </Link>
@@ -109,11 +116,20 @@ export function SessionView() {
       )}
 
       {state ? (
-        <main className="grid flex-1 gap-4 p-5 lg:h-[calc(100vh-57px)] lg:grid-cols-[300px_minmax(0,1fr)_360px] lg:overflow-hidden">
-          <DeviceList state={state} actions={actions} />
-          <LiveView session={session} state={state} onError={onError} />
-          <LogPanel logs={logs} onClear={clearLogs} />
-        </main>
+        <>
+          <main className="grid gap-4 p-5 lg:h-[calc(100vh-57px)] lg:min-h-[720px] lg:grid-cols-[320px_minmax(0,1fr)_400px]">
+            <div className="flex min-h-0 min-w-0 flex-col gap-4 lg:overflow-y-auto lg:overflow-x-hidden">
+              <ProjectPanel state={state} jobs={jobs} form={form} setForm={setForm} call={call} job={job} onError={onError} />
+              <DeviceList state={state} actions={actions} locked={driving} className="min-h-40 flex-1" />
+            </div>
+            <LiveView session={session} state={state} driving={driving} agentTouch={driving ? jobs.job?.touch : undefined} onError={onError} />
+            <div className="flex min-h-0 min-w-0 flex-col gap-4">
+              <AgentPanel jobs={jobs} className="min-h-[420px] flex-[7]" />
+              <LogPanel logs={logs} onClear={clearLogs} className="flex-[3]" />
+            </div>
+          </main>
+          <Results jobs={jobs} locales={form.locales} job={job} onError={onError} />
+        </>
       ) : (
         <main className="flex flex-1 items-center justify-center text-sm text-neutral-500">Connecting to your session…</main>
       )}

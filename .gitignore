@@ -20,6 +20,7 @@ next-env.d.ts
 # Captures and rendered assets (large, regenerated per run)
 captures/
 renders/
+.shotwright/
 *.mov
 *.mp4
 

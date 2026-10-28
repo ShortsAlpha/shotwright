@@ -1,7 +1,8 @@
 /**
  * Live view: polls the driver's screenshot at a fixed rate, downscales it to JPEG with ffmpeg and
  * sends it as a `frame`. One capture runs at a time, and a frame is skipped while the socket still
- * has unsent data, so frames never pile up.
+ * has unsent data, so frames never pile up. Screenshots taken for the server (`offer`) are reused,
+ * so an exploration does not make the runner capture the same screen twice.
  */
 import type { DeviceDriver, Frame } from "@shotwright/core";
 import type { AgentLogger } from "./drivers.ts";
@@ -39,14 +40,19 @@ export async function toJpeg(png: Uint8Array, maxWidth: number): Promise<{ jpeg:
 
 export class Streamer {
   private generation = 0;
+  private offered: { png: Uint8Array; at: number } | null = null;
   private readonly getDriver: () => DeviceDriver | null;
   private readonly sink: FrameSink;
   private readonly log: AgentLogger;
 
-  constructor(getDriver: () => DeviceDriver | null, sink: FrameSink, log: AgentLogger) {
+  /** True while frames should not be captured (an app launch: a screenshot then can stall the runner). */
+  private readonly paused: () => boolean;
+
+  constructor(getDriver: () => DeviceDriver | null, sink: FrameSink, log: AgentLogger, paused: () => boolean = () => false) {
     this.getDriver = getDriver;
     this.sink = sink;
     this.log = log;
+    this.paused = paused;
   }
 
   get running(): boolean {
@@ -61,6 +67,18 @@ export class Streamer {
 
   stop(): void {
     if (this.running) this.generation++;
+    this.offered = null;
+  }
+
+  /** A screenshot the driver just took for someone else; the next frame uses it instead of capturing. */
+  offer(png: Uint8Array): void {
+    if (this.running) this.offered = { png, at: performance.now() };
+  }
+
+  private takeOffered(maxAgeMs: number): Uint8Array | null {
+    const offered = this.offered;
+    this.offered = null;
+    return offered && performance.now() - offered.at <= maxAgeMs ? offered.png : null;
   }
 
   private async loop(generation: number, intervalMs: number, maxWidth: number): Promise<void> {
@@ -71,8 +89,8 @@ export class Streamer {
       try {
         const driver = this.getDriver();
         if (!driver) throw new Error("No device driver; run runner.ensure first");
-        if (this.sink.ready()) {
-          const png = await driver.screenshot();
+        if (this.sink.ready() && !this.paused()) {
+          const png = this.takeOffered(intervalMs) ?? (await driver.screenshot());
           if (generation !== this.generation) break;
           const { jpeg, width, height } = await toJpeg(png, maxWidth);
           if (generation !== this.generation) break;
