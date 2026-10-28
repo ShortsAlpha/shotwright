@@ -19,6 +19,9 @@
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@shotwright/core": "*"
+  },
   "devDependencies": {
     "tsx": "^4.23.15"
   }

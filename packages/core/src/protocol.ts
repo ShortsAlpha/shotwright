@@ -3,7 +3,8 @@
  * that the agent opens (`/agent`). The agent dials out, so the Mac needs no open ports.
  *
  * 1. Agent connects and sends `hello`.
- * 2. Server answers `pairing` with a short code; the agent prints it.
+ * 2. Server answers `pairing` with a short code; the agent prints it. An expired code is
+ *    replaced by a new `pairing`. A reconnecting agent sends its `sessionId` in `hello` instead.
  * 3. The user enters the code on the site; the server sends `paired`.
  * 4. The server calls agent methods with `call`; the agent answers each with `result`.
  *    The agent pushes `frame` (live view) and `log` messages on its own.
@@ -67,6 +68,11 @@ export const HelloSchema = z.object({
   protocol: z.number().int(),
   agentVersion: z.string(),
   machine: z.object({ xcode: z.string().optional(), macos: z.string().optional() }),
+  /**
+   * The session from an earlier `paired`, sent again after a reconnect. If the server still
+   * knows it, it answers `paired` right away; otherwise it issues a new `pairing` code.
+   */
+  sessionId: z.string().optional(),
 });
 
 export const ResultSchema = z.object({
