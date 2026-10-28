@@ -20,7 +20,7 @@ Browser ──► Web app (Next.js, hosted) ──► Meta Model API / Baseten
             Mac agent (TypeScript CLI) ──► xcodebuild, simctl, UI driver
 ```
 
-- **Web app**: projects, templates, rendering, Muse calls (keys stay server-side), zip export. Deployed as one long-lived Node process on Railway (Vercel's WebSocket beta pins each connection to one instance, so the agent and the browser could land on different ones).
+- **Web app**: projects, templates, rendering, Muse calls (keys stay server-side), zip export. Deployed as one long-lived Node process in a Docker web service on Render (Playwright base image, 2 GB instance; Fly.io as fallback). Not Vercel: its WebSocket beta pins each connection to one instance, so the agent and the browser could land on different ones. Not Railway: signups paused after its Oct 21, 2026 security incident.
 - **Mac agent**: hands and eyes only — build, boot, install, launch, tap, screenshot, record. Decisions come from the server.
 - **Input**: the developer's own Xcode project on their Mac (source never uploaded). Optional App Store URL to prefill name, icon, colors and locales via the iTunes Lookup API.
 - **Demo data contract**: the app reads a `-ShotwrightDemo` launch argument and loads demo content; optional test account for login walls.
@@ -73,7 +73,7 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | Oct 31 | Renderer: templates, SVG frames, captions, text fitting, RTL, exact-size export |
 | Nov 1 | Localization (Spark Open), store metadata, demo mode on the site |
 | Nov 2 | Preview + header/search videos, SAM 3.1 zooms, Muse Image backgrounds, validator. If time permits: narrated previews per locale (Spark Open writes, ElevenLabs reads) |
-| Nov 3 | Railway deploy, zip export polish, **feature freeze**, full rehearsal |
+| Nov 3 | Render deploy (Dockerfile ready earlier), zip export polish, **feature freeze**, full rehearsal |
 | Nov 4 | 3-minute demo video, README, submit |
 
 ## Demo video (3 min)
