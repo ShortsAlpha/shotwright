@@ -216,6 +216,30 @@ Recommendation:
 3. Don't promise an automated "Duo fold" beat in the demo until 2 works. Show the outer set and
    the manual unfold instead. Keep an eye on the forum thread and Xcode 27.1 updates.
 
+### Update Oct 28: manual unfold works
+
+The developer unfolded "Shotwright iPhone Duo" by hand in Device Hub
+(`/Applications/Xcode.app/Contents/Applications/DeviceHub.app`). Results, all with `simctl io`:
+
+| Check | Result |
+|---|---|
+| Inner display after unfold (`--display=3`) | Home screen, **2853×2007 landscape**; the outer display goes black |
+| `simctl launch` Settings, terminate, relaunch with `-AppleLanguages (de)` | Stays unfolded; Settings renders in German in the iPad-style split view |
+| Status bar override | Survives the unfold (09:41, in a column on the right in landscape) |
+| Rotate a quarter turn left | Inner capture becomes **2007×2853 portrait**, upright UI, status bar on top |
+| `simctl shutdown` + boot | **Folded again**: inner black, outer shows the home screen |
+
+Pipeline consequences:
+
+- Boot the Duo once per session, ask the developer to unfold it once, then capture every locale
+  for the inner set without rebooting. Detect the state by checking whether `--display=3` is
+  black.
+- Rotate for portrait (Apple accepts both 2007×2853 and 2853×2007). The runner can set
+  `XCUIDevice.shared.orientation`, so this can be automated; the simulator control tool's
+  `rotate` also worked.
+- Device Hub boots its own default "iPhone Duo" device too; ignore it and shut it down to save
+  RAM.
+
 ## 4. UI driver: ShotwrightRunner (built, working)
 
 Location: `ios/ShotwrightRunner/`. It is a hand-written `project.pbxproj` (objectVersion 77,

@@ -101,7 +101,7 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | 8 GB RAM Mac | One simulator at a time; render on the server |
 | UI driver | Resolved: our own XCUITest runner (`ios/ShotwrightRunner`), no idb or WebDriverAgent. Needs per-request timeouts and restart on hang. |
 | Login walls, paywalls, empty states | Demo launch argument, test account, deep links |
-| Duo inner display: no programmatic unfold | Automate the outer set; developer unfolds once by hand, pipeline captures `--display=3`. Don't promise an automated fold in the demo. |
+| Duo inner display: no programmatic unfold | Verified Oct 28: developer unfolds once per boot in Device Hub; the state survives app relaunches and locale changes, and rotation gives portrait 2007×2853. Automate everything after that step. |
 | Apps with their own language setting ignore `-AppleLanguages` | Reinstall per locale or use the app's own launch argument |
 | No accessibility identifiers in real apps | Structural selectors; Muse repair as fallback |
 | Slow launches (5–25 s) on 8 GB | Capture several screens per launch; launch once per locale |
