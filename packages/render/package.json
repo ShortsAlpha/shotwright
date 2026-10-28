@@ -1,0 +1,25 @@
+{
+  "name": "@shotwright/render",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Screenshot composer: HTML/CSS templates, our own SVG device frames and bundled OFL fonts, rendered at App Store pixel sizes with headless Chromium",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "render": "node scripts/render.ts",
+    "smoke": "node scripts/smoke.ts",
+    "browsers": "playwright install --only-shell chromium",
+    "fonts:fetch": "node scripts/fetch-fonts.ts"
+  },
+  "dependencies": {
+    "@shotwright/core": "*",
+    "playwright": "^1.64.1",
+    "sharp": "^0.35.5"
+  }
+}

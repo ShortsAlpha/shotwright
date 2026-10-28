@@ -1,0 +1,380 @@
+[
+  {
+    "id": "inter",
+    "family": "Inter",
+    "weight": "100 900",
+    "version": "v20 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Latin, Cyrillic, Greek, Vietnamese",
+    "source": "https://github.com/google/fonts/tree/main/ofl/inter",
+    "licenseFile": "licenses/inter-OFL.txt",
+    "copyright": "Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)",
+    "files": [
+      {
+        "file": "inter-latin-wght-normal.woff2",
+        "subset": "latin",
+        "unicodeRange": "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD",
+        "bytes": 48256,
+        "sha256": "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62"
+      },
+      {
+        "file": "inter-latin-ext-wght-normal.woff2",
+        "subset": "latin-ext",
+        "unicodeRange": "U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF",
+        "bytes": 85068,
+        "sha256": "34b9c504cab7a73e37b746343a449132e56cf7b5481af2cb81dc74dcff25c956"
+      },
+      {
+        "file": "inter-cyrillic-wght-normal.woff2",
+        "subset": "cyrillic",
+        "unicodeRange": "U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116",
+        "bytes": 18748,
+        "sha256": "71d5ee93cc1e9f1d520a3a8b66456de18c7879d8df09d57fcd2eaff75fef0075"
+      },
+      {
+        "file": "inter-cyrillic-ext-wght-normal.woff2",
+        "subset": "cyrillic-ext",
+        "unicodeRange": "U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F",
+        "bytes": 25960,
+        "sha256": "ca157063339ac4ad418f214f3abfed119b0798ab4d377386ce5c9e5a7a435ebd"
+      },
+      {
+        "file": "inter-greek-wght-normal.woff2",
+        "subset": "greek",
+        "unicodeRange": "U+0370-0377,U+037A-037F,U+0384-038A,U+038C,U+038E-03A1,U+03A3-03FF",
+        "bytes": 18996,
+        "sha256": "1be3448e292fbf05ffe176fe1e43f135013d50b1e7d324ad1a558f623d3bb6f6"
+      },
+      {
+        "file": "inter-greek-ext-wght-normal.woff2",
+        "subset": "greek-ext",
+        "unicodeRange": "U+1F00-1FFF",
+        "bytes": 11232,
+        "sha256": "6e9e020a25f9b56d418f2c085b1d3c09725a4da23fe693a5b463064606732190"
+      },
+      {
+        "file": "inter-vietnamese-wght-normal.woff2",
+        "subset": "vietnamese",
+        "unicodeRange": "U+0102-0103,U+0110-0111,U+0128-0129,U+0168-0169,U+01A0-01A1,U+01AF-01B0,U+0300-0301,U+0303-0304,U+0308-0309,U+0323,U+0329,U+1EA0-1EF9,U+20AB",
+        "bytes": 10252,
+        "sha256": "5c66f9e07e90c6d4ac4922cc68d60de26c17b1858e677fb5e603fce3952b3ff2"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-arabic",
+    "family": "Noto Sans Arabic",
+    "weight": "100 900",
+    "version": "v33 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Arabic (ar, fa, ur)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansarabic",
+    "licenseFile": "licenses/noto-sans-arabic-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic)",
+    "files": [
+      {
+        "file": "noto-sans-arabic-arabic-wght-normal.woff2",
+        "subset": "arabic",
+        "unicodeRange": "U+0600-06FF,U+0750-077F,U+0870-088E,U+0890-0891,U+0897-08E1,U+08E3-08FF,U+200C-200E,U+2010-2011,U+204F,U+2E41,U+FB50-FDFF,U+FE70-FE74,U+FE76-FEFC,U+102E0-102FB,U+10E60-10E7E,U+10EC2-10EC4,U+10EFC-10EFF,U+1EE00-1EE03,U+1EE05-1EE1F,U+1EE21-1EE22,U+1EE24,U+1EE27,U+1EE29-1EE32,U+1EE34-1EE37,U+1EE39,U+1EE3B,U+1EE42,U+1EE47,U+1EE49,U+1EE4B,U+1EE4D-1EE4F,U+1EE51-1EE52,U+1EE54,U+1EE57,U+1EE59,U+1EE5B,U+1EE5D,U+1EE5F,U+1EE61-1EE62,U+1EE64,U+1EE67-1EE6A,U+1EE6C-1EE72,U+1EE74-1EE77,U+1EE79-1EE7C,U+1EE7E,U+1EE80-1EE89,U+1EE8B-1EE9B,U+1EEA1-1EEA3,U+1EEA5-1EEA9,U+1EEAB-1EEBB,U+1EEF0-1EEF1",
+        "bytes": 165960,
+        "sha256": "ce85091f020920b65762b387b194ef59457ea5b25b760f2dcc35240a94bb8669"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-hebrew",
+    "family": "Noto Sans Hebrew",
+    "weight": "100 900",
+    "version": "v50 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Hebrew (he)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanshebrew",
+    "licenseFile": "licenses/noto-sans-hebrew-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/hebrew)",
+    "files": [
+      {
+        "file": "noto-sans-hebrew-hebrew-wght-normal.woff2",
+        "subset": "hebrew",
+        "unicodeRange": "U+0307-0308,U+0590-05FF,U+200C-2010,U+20AA,U+25CC,U+FB1D-FB4F",
+        "bytes": 12264,
+        "sha256": "8dd0a0bc744eca2c6d5d618bf002f8ef98b2948b31020e3cb64fe3587c9abb74"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-thai",
+    "family": "Noto Sans Thai",
+    "weight": "100 900",
+    "version": "v29 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Thai (th)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansthai",
+    "licenseFile": "licenses/noto-sans-thai-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/thai)",
+    "files": [
+      {
+        "file": "noto-sans-thai-thai-wght-normal.woff2",
+        "subset": "thai",
+        "unicodeRange": "U+02D7,U+0303,U+0331,U+0E01-0E5B,U+200C-200D,U+25CC",
+        "bytes": 26924,
+        "sha256": "1f5a173641bbcb3ca4fb0a986858b6b07f8cd5dd2ed61236b40548c7a3c7292f"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-devanagari",
+    "family": "Noto Sans Devanagari",
+    "weight": "100 900",
+    "version": "v30 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Devanagari (hi, mr)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansdevanagari",
+    "licenseFile": "licenses/noto-sans-devanagari-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/devanagari)",
+    "files": [
+      {
+        "file": "noto-sans-devanagari-devanagari-wght-normal.woff2",
+        "subset": "devanagari",
+        "unicodeRange": "U+0900-097F,U+1CD0-1CF9,U+200C-200D,U+20A8,U+20B9,U+20F0,U+25CC,U+A830-A839,U+A8E0-A8FF,U+11B00-11B09",
+        "bytes": 121192,
+        "sha256": "3b3cae4d2600cb502286577fcfbc7f0caa05d9bb3c28d6699aeb56302d35e730"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-bengali",
+    "family": "Noto Sans Bengali",
+    "weight": "100 900",
+    "version": "v33 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Bengali (bn)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansbengali",
+    "licenseFile": "licenses/noto-sans-bengali-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/bengali)",
+    "files": [
+      {
+        "file": "noto-sans-bengali-bengali-wght-normal.woff2",
+        "subset": "bengali",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0980-09FE,U+1CD0,U+1CD2,U+1CD5-1CD6,U+1CD8,U+1CE1,U+1CEA,U+1CED,U+1CF2,U+1CF5-1CF7,U+200C-200D,U+20B9,U+25CC,U+A8F1",
+        "bytes": 107720,
+        "sha256": "4ccdc6269af7581727fc3eea491831bda1962c1baaca7f2c0dec054bfddde478"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-gujarati",
+    "family": "Noto Sans Gujarati",
+    "weight": "100 900",
+    "version": "v27 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Gujarati (gu)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansgujarati",
+    "licenseFile": "licenses/noto-sans-gujarati-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/gujarati)",
+    "files": [
+      {
+        "file": "noto-sans-gujarati-gujarati-wght-normal.woff2",
+        "subset": "gujarati",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0A80-0AFF,U+200C-200D,U+20B9,U+25CC,U+A830-A839",
+        "bytes": 112268,
+        "sha256": "ea048a83d79022c67f1e0da348c881b68a35f86411ab9e2e5a7c7a06ceb87e2a"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-gurmukhi",
+    "family": "Noto Sans Gurmukhi",
+    "weight": "100 900",
+    "version": "v29 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Gurmukhi (pa)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansgurmukhi",
+    "licenseFile": "licenses/noto-sans-gurmukhi-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/gurmukhi)",
+    "files": [
+      {
+        "file": "noto-sans-gurmukhi-gurmukhi-wght-normal.woff2",
+        "subset": "gurmukhi",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0A01-0A76,U+200C-200D,U+20B9,U+25CC,U+262C,U+A830-A839",
+        "bytes": 33824,
+        "sha256": "fc4c2bf6b7387ce4b0a6b7d38c459fb50c31680a3148c186123af49cf73b2bfa"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-kannada",
+    "family": "Noto Sans Kannada",
+    "weight": "100 900",
+    "version": "v32 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Kannada (kn)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanskannada",
+    "licenseFile": "licenses/noto-sans-kannada-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/kannada)",
+    "files": [
+      {
+        "file": "noto-sans-kannada-kannada-wght-normal.woff2",
+        "subset": "kannada",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0C80-0CF3,U+1CD0,U+1CD2-1CD3,U+1CDA,U+1CF2,U+1CF4,U+200C-200D,U+20B9,U+25CC,U+A830-A835",
+        "bytes": 90796,
+        "sha256": "c91f1e7b985ef85f1d06a3ce6f571ae8c52747e7f43a0520e6696d5bcc8e9f25"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-malayalam",
+    "family": "Noto Sans Malayalam",
+    "weight": "100 900",
+    "version": "v29 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Malayalam (ml)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansmalayalam",
+    "licenseFile": "licenses/noto-sans-malayalam-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/malayalam)",
+    "files": [
+      {
+        "file": "noto-sans-malayalam-malayalam-wght-normal.woff2",
+        "subset": "malayalam",
+        "unicodeRange": "U+0307,U+0323,U+0951-0952,U+0964-0965,U+0D00-0D7F,U+1CDA,U+1CF2,U+200C-200D,U+20B9,U+25CC,U+A830-A832",
+        "bytes": 89468,
+        "sha256": "c21d9e855daa5f1e3e8aeccc53fe469d98a7dc41abb4d85bd6d8574341559eec"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-oriya",
+    "family": "Noto Sans Oriya",
+    "weight": "100 900",
+    "version": "v35 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Odia (or)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansoriya",
+    "licenseFile": "licenses/noto-sans-oriya-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/oriya)",
+    "files": [
+      {
+        "file": "noto-sans-oriya-oriya-wght-normal.woff2",
+        "subset": "oriya",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0B01-0B77,U+1CDA,U+1CF2,U+200C-200D,U+20B9,U+25CC",
+        "bytes": 98872,
+        "sha256": "3ec617778757fa68b68ccab3977dda11204b24065118f121edb932112ab71f58"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-tamil",
+    "family": "Noto Sans Tamil",
+    "weight": "100 900",
+    "version": "v31 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Tamil (ta)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanstamil",
+    "licenseFile": "licenses/noto-sans-tamil-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/tamil)",
+    "files": [
+      {
+        "file": "noto-sans-tamil-tamil-wght-normal.woff2",
+        "subset": "tamil",
+        "unicodeRange": "U+0964-0965,U+0B82-0BFA,U+200C-200D,U+20B9,U+25CC",
+        "bytes": 50468,
+        "sha256": "98e5b968b0e64d56a5833e1f8059453784190564ceeeda96613fd87282d3d8a1"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-telugu",
+    "family": "Noto Sans Telugu",
+    "weight": "100 900",
+    "version": "v30 (fontsource 5.3.0)",
+    "license": "OFL-1.1",
+    "scripts": "Telugu (te)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanstelugu",
+    "licenseFile": "licenses/noto-sans-telugu-OFL.txt",
+    "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/telugu)",
+    "files": [
+      {
+        "file": "noto-sans-telugu-telugu-wght-normal.woff2",
+        "subset": "telugu",
+        "unicodeRange": "U+0951-0952,U+0964-0965,U+0C00-0C7F,U+1CDA,U+1CF2,U+200C-200D,U+25CC",
+        "bytes": 123972,
+        "sha256": "bd266bd1cddc15b5ed21d69a6e68ed8747427af31e1f42d87104de547ff15f3c"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-jp",
+    "family": "Noto Sans JP",
+    "weight": "700",
+    "version": "v57 (fontsource 5.3.1)",
+    "license": "OFL-1.1",
+    "scripts": "Japanese (ja)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosansjp",
+    "licenseFile": "licenses/noto-sans-jp-OFL.txt",
+    "copyright": "Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'",
+    "files": [
+      {
+        "file": "noto-sans-jp-japanese-700-normal.woff2",
+        "subset": "japanese",
+        "bytes": 1158216,
+        "sha256": "f16d3300de1ccbdb092d8872ab5ea4ab54af3265b6188699e3c215fedbbfbd11"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-kr",
+    "family": "Noto Sans KR",
+    "weight": "700",
+    "version": "v40 (fontsource 5.3.1)",
+    "license": "OFL-1.1",
+    "scripts": "Korean (ko)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanskr",
+    "licenseFile": "licenses/noto-sans-kr-OFL.txt",
+    "copyright": "Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'",
+    "files": [
+      {
+        "file": "noto-sans-kr-korean-700-normal.woff2",
+        "subset": "korean",
+        "bytes": 559392,
+        "sha256": "419a46fa75b0c492aa18218ff8c2d36221ad182cfa3db96a535c0e734961228b"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-sc",
+    "family": "Noto Sans SC",
+    "weight": "700",
+    "version": "v41 (fontsource 5.3.1)",
+    "license": "OFL-1.1",
+    "scripts": "Simplified Chinese (zh-Hans)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanssc",
+    "licenseFile": "licenses/noto-sans-sc-OFL.txt",
+    "copyright": "Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'",
+    "files": [
+      {
+        "file": "noto-sans-sc-chinese-simplified-700-normal.woff2",
+        "subset": "chinese-simplified",
+        "bytes": 1172244,
+        "sha256": "e1df51edc00bce27b58044e829fb8ec6accc8a5daece475413de90d52818845c"
+      }
+    ]
+  },
+  {
+    "id": "noto-sans-tc",
+    "family": "Noto Sans TC",
+    "weight": "700",
+    "version": "v40 (fontsource 5.3.1)",
+    "license": "OFL-1.1",
+    "scripts": "Traditional Chinese (zh-Hant)",
+    "source": "https://github.com/google/fonts/tree/main/ofl/notosanstc",
+    "licenseFile": "licenses/noto-sans-tc-OFL.txt",
+    "copyright": "Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'",
+    "files": [
+      {
+        "file": "noto-sans-tc-chinese-traditional-700-normal.woff2",
+        "subset": "chinese-traditional",
+        "bytes": 1021008,
+        "sha256": "4b7fedc7ca9e0b5cd3f79834f0b384e83274b84f802a310614d03362f2f09892"
+      }
+    ]
+  }
+]
