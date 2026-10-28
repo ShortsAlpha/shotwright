@@ -3,14 +3,17 @@
  * The browser pairs with `POST /api/pair`, which sets the session cookie, then opens `/ui`.
  *
  * Browser -> server: `call` (forwarded to the agent; answered with `result`), and `job` (start an
- * exploration or a replay, or cancel; answered with `result`, value the JobView or null).
+ * exploration, a replay or a compose, or cancel; answered with `result`, value the JobView or null;
+ * `caption` answers with the saved CaptionView, `preview` with { template: dataUrl }).
  * Server -> browser: `state` on connect and on every change, `log` batches, `frame`s from the
  * agent as they arrive (same shape as the agent protocol's `frame`), `jobs` (the whole job
  * snapshot, on connect) followed by `job.event`s (lib/jobs/state.ts), and `error`.
- * Run files (thumbnails, screenshots) are served at `/api/artifacts/<runId>/<path>`.
+ * Run files (thumbnails, screenshots) are served at `/api/artifacts/<runId>/<path>`, and the
+ * upload-ready zip at `/api/runs/<runId>/zip`.
  */
 import type { AgentMethod, Frame, ScreenInfo, SimDevice } from "@shotwright/core";
 import type { JobAction, JobEvent, JobsSnapshot } from "./jobs/state.ts";
+import type { QuotaView } from "./limits.ts";
 
 /** Agent methods the browser may call. */
 export const UI_METHODS = [
@@ -30,6 +33,7 @@ export const UI_METHODS = [
   "driver.tap",
   "driver.swipe",
   "driver.typeText",
+  "duo.state",
 ] as const satisfies readonly AgentMethod[];
 
 export type UiMethod = (typeof UI_METHODS)[number];
@@ -55,6 +59,8 @@ export interface SessionState {
   readonly streaming: boolean;
   /** Methods currently running, with their udid when they have one. */
   readonly busy: readonly { readonly method: AgentMethod; readonly udid?: string }[];
+  /** What this session may still start (public-site limits, lib/limits.ts). */
+  readonly quota: { readonly explore: QuotaView; readonly captions: QuotaView };
 }
 
 export interface LogEntry {
@@ -85,7 +91,7 @@ export interface UiJobRequest {
   readonly type: "job";
   readonly id: string;
   readonly action: JobAction;
-  /** ExploreParams for "explore", ReplayParams for "replay". */
+  /** ExploreParams, ReplayParams, ComposeParams, CaptionParams or PreviewParams (lib/jobs/state.ts). */
   readonly params?: unknown;
 }
 

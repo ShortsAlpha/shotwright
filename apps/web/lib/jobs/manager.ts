@@ -1,10 +1,13 @@
 /**
- * Explore and replay jobs for one session. One job at a time; each is cancellable.
+ * Explore, replay and compose jobs for one session. One job at a time; each is cancellable.
  *
  * Explore: app.build -> runner.ensure (boots the simulator) -> app.install -> live view and the
  * 9:41 status bar -> explore() (verifies its own flow at the end) -> screen judge.
  * Replay: runner.ensure -> replayFlow() once per locale, with the exploration's screen records so
  * every screenshot is checked.
+ * Compose: captions for locales that have none (one Muse Spark Open call), the theme from the app
+ * icon (agent `app.icon`, once), then every screenshot whose inputs changed (lib/compose). Needs no
+ * simulator; a caption edit or a settings change restarts a running compose job.
  *
  * Progress goes to the session's browsers as JobEvents; files go to the run folder (artifacts.ts).
  */
@@ -28,6 +31,9 @@ import { expandArgs, splitArgs } from "./args.ts";
 import { buildManifest } from "./manifest.ts";
 import { newRunId, runDir, sessionDir, writeJson, writeThumb } from "./artifacts.ts";
 import { ScriptedProvider, stubJudge } from "./fake-models.ts";
+import { fakeCaptionWriter, museCaptionWriter, type CaptionWriter } from "../compose/captions.ts";
+import { composeRun, describeView, loadCompose, renderPreviews, setCaption, withComposeInfo } from "../compose/compose.ts";
+import { getQuotas, QuotaError } from "../limits.ts";
 import {
   EMPTY_JOBS,
   EXPLORER_MODELS,
@@ -37,6 +43,8 @@ import {
   isActive,
   localeName,
   modelLabel,
+  type CaptionParams,
+  type ComposeParams,
   type ExploreParams,
   type ExplorerModel,
   type JobEvent,
@@ -46,6 +54,7 @@ import {
   type JobsSnapshot,
   type JudgeView,
   type LocaleRun,
+  type PreviewParams,
   type ReplayParams,
   type RunView,
   type ShotView,
@@ -61,6 +70,8 @@ export interface JobHost {
   startLiveView(): Promise<void>;
   log(level: "info" | "warn" | "error", message: string): void;
   emit(event: JobEvent): void;
+  /** A quota was used (the page shows what is left). */
+  quotaChanged?(): void;
 }
 
 /** The explorer's API, injectable for tests. */
@@ -71,6 +82,8 @@ export interface JobDeps {
   readonly createProvider: (model: ExplorerModel) => ExplorerProvider;
   /** True, or why there is no judge (the explorer's ranking is used then). */
   readonly judgeAvailable: () => string | true;
+  /** Writes captions for compose, or says why it can't (the English captions are used then). */
+  readonly captionWriter: () => CaptionWriter | string;
 }
 
 const fakeModels = process.env.SHOTWRIGHT_FAKE_MODELS === "1";
@@ -82,6 +95,7 @@ export const DEFAULT_DEPS: JobDeps = fakeModels
       judgeScreens: stubJudge,
       createProvider: () => new ScriptedProvider(),
       judgeAvailable: () => true,
+      captionWriter: () => fakeCaptionWriter,
     }
   : {
       explore: runExplore,
@@ -89,6 +103,8 @@ export const DEFAULT_DEPS: JobDeps = fakeModels
       judgeScreens: runJudge,
       createProvider: (model) => createExplorerProvider(model, model === "open" ? {} : { reasoningEffort: "low" }),
       judgeAvailable: () => (process.env.BASETEN_API_KEY ? true : "BASETEN_API_KEY is not set on the server, so the explorer's ranking is used."),
+      captionWriter: () =>
+        process.env.BASETEN_API_KEY ? museCaptionWriter({ reasoningEffort: "low" }) : "BASETEN_API_KEY is not set on the server, so the English captions are used.",
     };
 
 /** Per-run spending limit for the explorer, USD. */
@@ -140,9 +156,13 @@ function parseLocales(input: unknown): string[] {
 /** "Renew.xcodeproj" -> "Renew"; the scheme usually names the app better. */
 const appNameOf = (params: ExploreParams) => params.scheme || basename(params.projectPath, extname(params.projectPath));
 
+const JOB_NAMES: Record<JobKind, string> = { explore: "Exploration", replay: "Replay", compose: "Compose" };
+
 export class SessionJobs {
   private state: JobsSnapshot = EMPTY_JOBS;
   private controller: AbortController | null = null;
+  /** Settles when the running job has finished (after its `ended` event). */
+  private running: Promise<void> | null = null;
   private exploration: Exploration | null = null;
   private readonly host: JobHost;
   private readonly deps: JobDeps;
@@ -162,6 +182,11 @@ export class SessionJobs {
     return isActive(this.state.job);
   }
 
+  /** A job is using the simulator (compose jobs don't), so the browser must not drive it. */
+  get driving(): boolean {
+    return this.active && this.state.job?.kind !== "compose";
+  }
+
   private emit(event: JobEvent): void {
     this.state = applyJobEvent(this.state, event);
     this.host.emit(event);
@@ -175,7 +200,7 @@ export class SessionJobs {
 
   private begin(kind: JobKind, runId: string): { job: JobView; signal: AbortSignal } {
     if (this.active) throw new Error("A job is already running. Stop it first.");
-    if (!this.host.agentConnected) throw new Error("The Mac agent is not connected.");
+    if (kind !== "compose" && !this.host.agentConnected) throw new Error("The Mac agent is not connected.");
     this.controller = new AbortController();
     const job: JobView = { id: `j${this.nextJob++}`, kind, status: "running", startedAt: Date.now(), runId };
     return { job, signal: this.controller.signal };
@@ -189,7 +214,7 @@ export class SessionJobs {
       this.emit({ type: "ended", status: "cancelled", at: Date.now() });
     } else {
       const text = firstLine(message(error));
-      this.host.log("error", `${this.state.job?.kind === "replay" ? "Replay" : "Exploration"} failed: ${text}`);
+      this.host.log("error", `${JOB_NAMES[this.state.job?.kind ?? "explore"]} failed: ${text}`);
       this.emit({ type: "ended", status: "failed", error: text, at: Date.now() });
     }
     this.controller = null;
@@ -209,10 +234,26 @@ export class SessionJobs {
 
   // --- Explore ----------------------------------------------------------------------
 
+  /** Runs a started job and records its promise (a compose restart waits for it). */
+  private track(signal: AbortSignal, work: Promise<void>, onError?: (error: unknown) => void): void {
+    this.running = work.then(
+      () => this.finish(signal, undefined),
+      (error: unknown) => {
+        onError?.(error);
+        this.finish(signal, error);
+      },
+    );
+  }
+
   startExplore(input: unknown): JobView {
     const params = parseExplore(input);
+    if (this.active) throw new Error("A job is already running. Stop it first.");
+    const quotas = getQuotas();
+    quotas.check("explore", this.host.sessionId);
     const runId = newRunId();
     const { job, signal } = this.begin("explore", runId);
+    quotas.consume("explore", this.host.sessionId);
+    this.host.quotaChanged?.();
     const device = this.host.device(params.udid);
     const run: RunView = {
       runId,
@@ -233,10 +274,7 @@ export class SessionJobs {
     };
     this.exploration = null;
     this.emit({ type: "started", job, run });
-    void this.explore(params, run, signal).then(
-      () => this.finish(signal, undefined),
-      (error: unknown) => this.finish(signal, error),
-    );
+    this.track(signal, this.explore(params, run, signal));
     return this.state.job!;
   }
 
@@ -421,6 +459,7 @@ export class SessionJobs {
     this.emit({ type: "judge", judge });
     await this.writeManifest(exploration);
     await jobRecord({ status: "done", bundleId: built.bundleId, endedAt: new Date().toISOString(), costUsd: result.costUsd });
+    await this.refreshCompose();
   }
 
   // --- Replay -----------------------------------------------------------------------
@@ -441,15 +480,15 @@ export class SessionJobs {
       run = { ...run, replays: previous ? run.replays.map((r) => (r.locale === locale ? fresh : r)) : [...run.replays, fresh] };
     }
     this.emit({ type: "started", job, run });
-    void this.replay(exploration, locales, signal).then(
-      () => this.finish(signal, undefined),
-      (error: unknown) => {
+    this.track(
+      signal,
+      this.replay(exploration, locales, signal).finally(() => this.refreshCompose()),
+      (error) => {
         for (const r of this.state.run?.replays ?? []) {
           if (r.status === "pending" || r.status === "running") {
             this.emit({ type: "locale", run: { ...r, status: signal.aborted ? "cancelled" : "failed", ...(signal.aborted ? {} : { error: firstLine(message(error)) }) } });
           }
         }
-        this.finish(signal, error);
       },
     );
     return this.state.job!;
@@ -544,6 +583,146 @@ export class SessionJobs {
     }
   }
 
+  // --- Compose ----------------------------------------------------------------------
+
+  /** The run folder of the session's current exploration, or why there is nothing to compose. */
+  private composeDir(): string {
+    const exploration = this.exploration;
+    if (!exploration || this.state.run?.runId !== exploration.runId) throw new Error("Explore the app first.");
+    return exploration.dir;
+  }
+
+  /** Reloads the compose view from the run folder (after replays, a caption edit, a download…). */
+  async refreshCompose(): Promise<void> {
+    const exploration = this.exploration;
+    if (!exploration || this.state.run?.runId !== exploration.runId) return;
+    try {
+      const compose = await loadCompose(exploration.dir);
+      if (compose && this.state.run?.runId === exploration.runId) this.emit({ type: "compose", compose });
+    } catch (error) {
+      this.host.log("warn", `Compose: ${firstLine(message(error))}`);
+    }
+  }
+
+  /** Stops a running compose job and waits until it has unwound (other jobs: an error). */
+  private async stopCompose(): Promise<void> {
+    if (!this.active) return;
+    if (this.state.job?.kind !== "compose") throw new Error(`${JOB_NAMES[this.state.job!.kind]} is running; compose when it has finished.`);
+    this.cancel();
+    await this.running;
+  }
+
+  /**
+   * Starts a compose job, restarting one that runs (renders that finished are kept). Captions are
+   * written only for locales without them, so a normal compose makes at most one model call.
+   */
+  async startCompose(input: unknown): Promise<JobView> {
+    const params = (input ?? {}) as ComposeParams;
+    const dir = this.composeDir();
+    await this.stopCompose();
+    const host = this.host;
+    const quotas = getQuotas();
+    if (params.regenerateCaptions) quotas.check("captions", host.sessionId);
+
+    const { job, signal } = this.begin("compose", this.state.run!.runId);
+    const compose = await loadCompose(dir).catch(() => undefined);
+    const run: RunView = { ...this.state.run!, ...(compose && { compose }) };
+    this.emit({ type: "started", job, run });
+
+    const work = async () => {
+      // Captions: the writer counts against the caption quota; when that is used up, English is used.
+      const available = this.deps.captionWriter();
+      let captionWriter: CaptionWriter | undefined;
+      if (typeof available === "string") host.log("warn", available);
+      else {
+        captionWriter = async (request, s) => {
+          quotas.check("captions", host.sessionId);
+          quotas.consume("captions", host.sessionId);
+          host.quotaChanged?.();
+          host.log("info", `Writing captions in ${request.locales.map(localeName).join(", ")} with Muse Spark Open`);
+          const result = await available(request, s);
+          host.log("info", `Captions: ${request.screens.length} screens × ${request.locales.length} languages in ${(result.ms / 1000).toFixed(1)} s (${result.calls} call${result.calls === 1 ? "" : "s"})`);
+          return result;
+        };
+      }
+      const projectPath = this.exploration?.params.projectPath;
+      const started = Date.now();
+      const runCompose = (writer: CaptionWriter | undefined) =>
+        composeRun(dir, {
+          ...(params.settings && { settings: params.settings }),
+          ...(writer && { captionWriter: writer }),
+          ...(params.regenerateCaptions && { regenerateCaptions: true }),
+          // Without the agent the default theme is used for now, and the icon is read next time.
+          ...(host.agentConnected &&
+            projectPath && {
+              icon: async () => {
+                const icon = await abortable(signal, host.call("app.icon", { projectPath }));
+                if (!icon) host.log("info", "No app icon found in the project; using the default theme.");
+                else host.log("info", `Theme from the app icon (${icon.file}, ${icon.width}×${icon.height})`);
+                return icon ? new Uint8Array(Buffer.from(icon.png, "base64")) : null;
+              },
+            }),
+          signal,
+          onEvent: (event) => {
+            switch (event.type) {
+              case "phase":
+                this.phase(event.phase, event.label);
+                break;
+              case "view":
+                this.emit({ type: "compose", compose: event.view });
+                break;
+              case "render":
+                this.emit({ type: "render", set: event.set, locale: event.locale, render: event.render });
+                break;
+              case "progress":
+                this.emit({ type: "progress", done: event.done, total: event.total });
+                break;
+            }
+          },
+        });
+      let summary;
+      try {
+        summary = await runCompose(captionWriter);
+      } catch (error) {
+        // Out of caption quota (or the model failed): compose with the captions there are.
+        if (signal.aborted || error instanceof JobCancelled || !captionWriter || params.regenerateCaptions) throw error;
+        host.log("warn", `${error instanceof QuotaError ? "" : "Captions failed: "}${firstLine(message(error))} Using the English captions for now.`);
+        summary = await runCompose(undefined);
+      }
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      host.log(
+        summary.failed ? "warn" : "info",
+        `Composed ${describeView(summary.view)}: ${summary.rendered} rendered, ${summary.upToDate} up to date${summary.failed ? `, ${summary.failed} failed` : ""} in ${seconds} s`,
+      );
+      if (summary.failed) throw new Error(`${summary.failed} screenshot${summary.failed === 1 ? "" : "s"} failed to render`);
+    };
+    this.track(signal, work());
+    return this.state.job!;
+  }
+
+  /** Saves a caption from the gallery and re-renders its image (now, or after the running job). */
+  async editCaption(input: unknown): Promise<unknown> {
+    const p = (input ?? {}) as Partial<CaptionParams>;
+    if (typeof p.locale !== "string" || typeof p.screen !== "string" || typeof p.text !== "string" || p.text.length > 200) {
+      throw new Error("Expected { locale, screen, text }");
+    }
+    const dir = this.composeDir();
+    const restart = this.active && this.state.job?.kind === "compose";
+    if (restart) await this.stopCompose();
+    const caption = await setCaption(dir, p.locale, p.screen, p.text);
+    this.emit({ type: "caption", locale: p.locale, screen: p.screen, caption });
+    await this.refreshCompose();
+    // A replay may be driving the simulator: the image shows as stale until the next compose.
+    if (!this.active) await this.startCompose({});
+    return caption;
+  }
+
+  /** Template picker thumbnails for these settings. */
+  async preview(input: unknown): Promise<Record<string, string>> {
+    const p = (input ?? {}) as PreviewParams;
+    return renderPreviews(this.composeDir(), p.settings ?? {}, typeof p.locale === "string" ? p.locale : undefined);
+  }
+
   private async writeManifest(exploration: Exploration): Promise<void> {
     const device = this.host.device(exploration.params.udid);
     const manifest = buildManifest({
@@ -558,7 +737,7 @@ export class SessionJobs {
       ...(exploration.judge && { judge: exploration.judge }),
       replays: exploration.replays,
     });
-    await writeJson(join(exploration.dir, "manifest.json"), manifest);
+    await writeJson(join(exploration.dir, "manifest.json"), await withComposeInfo(manifest, exploration.dir));
   }
 }
 

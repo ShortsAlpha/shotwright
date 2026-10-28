@@ -96,8 +96,13 @@ async function bytesOf(src: Uint8Array | string): Promise<Buffer> {
   return typeof src === "string" ? readFile(src) : Buffer.from(src.buffer, src.byteOffset, src.byteLength);
 }
 
+/**
+ * The page document. `__name` is a no-op stand-in for the helper esbuild adds around named inner
+ * functions when the caller runs under tsx (keepNames): `renderInPage` is serialized into the page
+ * and would otherwise throw "__name is not defined" there.
+ */
 const SHELL = (): string =>
-  `<!doctype html><html><head><meta charset="utf-8"><style>${fontFaceCss("/fonts/")}</style>` +
+  `<!doctype html><html><head><meta charset="utf-8"><script>var __name = function (target) { return target; };</script><style>${fontFaceCss("/fonts/")}</style>` +
   `<style id="tpl"></style></head><body><div id="root"></div></body></html>`;
 
 interface PageArgs {

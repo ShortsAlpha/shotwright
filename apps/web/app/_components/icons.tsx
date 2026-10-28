@@ -137,3 +137,20 @@ export const GlobeIcon = (props: IconProps) => (
     <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18" />
   </svg>
 );
+
+export const DownloadIcon = (props: IconProps) => (
+  <svg {...base} {...props}>
+    <path d="M12 3v12" />
+    <path d="M7 10l5 5 5-5" />
+    <path d="M4 20h16" />
+  </svg>
+);
+
+export const PaletteIcon = (props: IconProps) => (
+  <svg {...base} {...props}>
+    <path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4-4-7.2-9-7.2z" />
+    <circle cx="7.5" cy="11" r="1" fill="currentColor" />
+    <circle cx="10.5" cy="7" r="1" fill="currentColor" />
+    <circle cx="15" cy="7.5" r="1" fill="currentColor" />
+  </svg>
+);

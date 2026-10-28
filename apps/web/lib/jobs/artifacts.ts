@@ -14,6 +14,12 @@
  *       replay/<locale>/<name>.png     replayed screens, full resolution
  *       replay/<locale>/thumbs/<name>.jpg
  *       replay/replay.json             per-locale results (steps, checks, files)
+ *       captions.json                  captions per locale and screen (lib/compose/captions.ts)
+ *       icon.png, theme.json           the app icon and the themes derived from it
+ *       compose.json                   compose settings and one record per rendered screenshot
+ *       renders/<set>/<locale>/<nn>_<screen>.png         final App Store screenshots
+ *       renders/<set>/<locale>/thumbs/<nn>_<screen>.jpg
+ *       export/<app>-screenshots.zip   fastlane deliver layout + README.txt (lib/compose/compose.ts)
  *
  * <data> is `.shotwright` at the repo root, or SHOTWRIGHT_DATA_DIR.
  */
@@ -53,7 +59,7 @@ export function newRunId(now = new Date()): string {
 export function artifactPath(sessionId: string, runId: string, path: string): string | null {
   if (!SAFE_ID.test(sessionId) || !SAFE_ID.test(runId)) return null;
   const segments = path.split("/");
-  if (segments.length === 0 || segments.length > 4 || !segments.every((s) => SAFE_SEGMENT.test(s))) return null;
+  if (segments.length === 0 || segments.length > 6 || !segments.every((s) => SAFE_SEGMENT.test(s))) return null;
   if (!/\.(png|jpg|json)$/.test(path)) return null;
   return join(runDir(sessionId, runId), ...segments);
 }
@@ -128,11 +134,19 @@ export interface Manifest {
     readonly why: string;
     readonly file: string;
     readonly locales: Readonly<Record<string, { readonly file: string; readonly verified: boolean }>>;
+    /** Final caption per locale (transcreated or edited), once composed. */
+    readonly captions?: Readonly<Record<string, string>>;
   }>;
+  /** Rendered screenshots, set -> locale -> files in App Store order, once composed. */
+  readonly renders?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
   readonly files: {
     readonly exploration: string;
     readonly flow: string;
     readonly judge?: string;
     readonly replay?: string;
+    readonly captions?: string;
+    readonly theme?: string;
+    readonly icon?: string;
+    readonly compose?: string;
   };
 }

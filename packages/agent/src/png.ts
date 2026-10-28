@@ -1,5 +1,5 @@
 /** A tiny RGB canvas that encodes to PNG (8-bit, no alpha), for generated test frames. */
-import { crc32, deflateSync } from "node:zlib";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 
 export type Rgb = readonly [number, number, number];
 
@@ -115,4 +115,84 @@ export function hsl(h: number, s: number, l: number): Rgb {
   const a = s * Math.min(l, 1 - l);
   const f = (n: number) => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
   return [f(0), f(8), f(4)];
+}
+
+/**
+ * Decodes an 8-bit, non-interlaced PNG (grey, grey+alpha, RGB or RGBA; what simctl and Xcode write)
+ * into unfiltered scanlines. Enough to inspect pixels without an image library.
+ */
+export function decodePng(png: Uint8Array): { width: number; height: number; channels: number; pixels: Buffer } {
+  const buf = Buffer.from(png.buffer, png.byteOffset, png.byteLength);
+  const { width, height } = pngSize(buf);
+  const depth = buf[24];
+  const colorType = buf[25];
+  const interlace = buf[28];
+  const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : colorType === 6 ? 4 : 0;
+  if (depth !== 8 || channels === 0 || interlace !== 0) {
+    throw new Error(`Unsupported PNG (bit depth ${depth}, colour type ${colorType}, interlace ${interlace})`);
+  }
+  const idat: Buffer[] = [];
+  for (let offset = 8; offset + 8 <= buf.length; ) {
+    const length = buf.readUInt32BE(offset);
+    const type = buf.toString("latin1", offset + 4, offset + 8);
+    if (type === "IDAT") idat.push(buf.subarray(offset + 8, offset + 8 + length));
+    if (type === "IEND") break;
+    offset += 12 + length;
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    const out = y * stride;
+    const prev = out - stride;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= channels ? pixels[out + x - channels]! : 0;
+      const b = y > 0 ? pixels[prev + x]! : 0;
+      const c = y > 0 && x >= channels ? pixels[prev + x - channels]! : 0;
+      let value = line[x]!;
+      switch (filter) {
+        case 1:
+          value += a;
+          break;
+        case 2:
+          value += b;
+          break;
+        case 3:
+          value += (a + b) >> 1;
+          break;
+        case 4: {
+          const p = a + b - c;
+          const pa = Math.abs(p - a);
+          const pb = Math.abs(p - b);
+          const pc = Math.abs(p - c);
+          value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+          break;
+        }
+      }
+      pixels[out + x] = value & 255;
+    }
+  }
+  return { width, height, channels, pixels };
+}
+
+/**
+ * Share of pixels (0..1) brighter than `threshold` in any colour channel, sampled on a grid of
+ * every `step`-th pixel. Transparent pixels count as black.
+ */
+export function litShare(png: Uint8Array, threshold = 24, step = 4): number {
+  const { width, height, channels, pixels } = decodePng(png);
+  let lit = 0;
+  let total = 0;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * channels;
+      total++;
+      if ((channels === 2 || channels === 4) && pixels[i + channels - 1]! < 16) continue;
+      const colour = channels >= 3 ? Math.max(pixels[i]!, pixels[i + 1]!, pixels[i + 2]!) : pixels[i]!;
+      if (colour > threshold) lit++;
+    }
+  }
+  return total === 0 ? 0 : lit / total;
 }

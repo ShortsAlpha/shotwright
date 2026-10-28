@@ -54,6 +54,10 @@ export const CALL_TIMEOUTS_MS: Readonly<Record<AgentMethod, number>> = {
   "driver.swipe": 120_000,
   "driver.typeText": 120_000,
   "driver.statusBar": 30_000,
+  // A walk of the project folder plus one PNG read.
+  "app.icon": 60_000,
+  // simctl io screenshot of the inner display (about 2 s) and a PNG decode.
+  "duo.state": 45_000,
 };
 
 const HELLO_TIMEOUT_MS = 10_000;

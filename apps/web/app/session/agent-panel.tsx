@@ -251,7 +251,9 @@ export function AgentPanel({ jobs, className = "" }: { jobs: JobsSnapshot; class
     status =
       job.status === "cancelling"
         ? "Stopping…"
-        : job.phase === "explore"
+        : job.kind === "compose"
+          ? `${job.phaseLabel ?? "Composing"}${job.progress && job.phase === "render" ? ` · ${job.progress.done} of ${job.progress.total}` : ""}`
+          : job.phase === "explore"
           ? `Turn ${lastTurn} of ${run?.maxTurns ?? 40}`
           : replaying && job.locales
             ? `Replaying in ${localeName(replaying.locale)} · ${position} of ${job.locales.length}`

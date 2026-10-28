@@ -6,6 +6,7 @@ import { EXPLORER_MODELS, LOCALES, isActive, localeName, type ExplorerModel, typ
 import type { SessionState } from "../../lib/ui-protocol.ts";
 import { RefreshIcon, SparkleIcon, Spinner, StopIcon } from "../_components/icons.tsx";
 import type { ExploreForm } from "./explore-form.ts";
+import { useNow } from "./agent-panel.tsx";
 import type { CallFn, JobFn } from "./use-session.ts";
 
 export const input =
@@ -24,6 +25,52 @@ function preferredScheme(project: XcodeProject | undefined): string {
   if (!project) return "";
   const name = describeProject(project.path).name;
   return project.schemes.find((s) => s === name) ?? project.schemes.find((s) => s.toLowerCase() === name.toLowerCase()) ?? project.schemes[0] ?? "";
+}
+
+const isDuo = (device: SimDevice | undefined) => device !== undefined && (device.setId === "iphone-duo-outer" || device.setId === "iphone-duo-inner" || /\bduo\b/i.test(device.name));
+
+/**
+ * iPhone Duo: nothing unfolds the simulator programmatically, so the developer does it once per boot
+ * in Device Hub; this checks the state (agent `duo.state`: the inner display is black while folded).
+ */
+function DuoFold({ device, call, connected }: { device: SimDevice; call: CallFn; connected: boolean }) {
+  const [state, setState] = useState<{ udid: string; unfolded: boolean | null; checking: boolean; error?: string }>({ udid: device.udid, unfolded: null, checking: false });
+  const current = state.udid === device.udid ? state : { udid: device.udid, unfolded: null, checking: false };
+  const booted = device.state === "Booted";
+  const check = () => {
+    setState({ ...current, checking: true });
+    call("duo.state", { udid: device.udid })
+      .then((r) => setState({ udid: device.udid, unfolded: r.unfolded, checking: false }))
+      .catch((e: unknown) => setState({ udid: device.udid, unfolded: null, checking: false, error: e instanceof Error ? e.message : String(e) }));
+  };
+  const badge =
+    current.unfolded === null
+      ? { text: "Fold state unknown", cls: "bg-neutral-100 text-neutral-500 dark:bg-neutral-800" }
+      : current.unfolded
+        ? { text: "Unfolded", cls: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300" }
+        : { text: "Folded", cls: "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300" };
+  return (
+    <div className="border-b border-neutral-100 px-4 py-3 dark:border-neutral-800">
+      <div className="flex items-center gap-2">
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badge.cls}`}>{badge.text}</span>
+        <button
+          type="button"
+          onClick={check}
+          disabled={!connected || current.checking}
+          title="Capture the inner display and see whether it is lit"
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 px-2 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+        >
+          {current.checking ? <Spinner className="size-3" /> : <RefreshIcon className="size-3" />}
+          Check
+        </button>
+      </div>
+      <p className="mt-1.5 text-[11px] leading-snug text-neutral-500">
+        {current.unfolded ? "The inner display is on: its screenshots can be captured." : "Unfold it in Device Hub (Xcode → Open Developer Tool → Device Hub) once per boot."}
+        {!booted && !current.unfolded && " Boot it first."}
+      </p>
+      {current.error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{current.error}</p>}
+    </div>
+  );
 }
 
 /** The simulator an exploration runs on: the live one, else Shotwright's iPhone 6.3, else any booted one. */
@@ -94,7 +141,18 @@ export function ProjectPanel({
 
   const project = projects?.find((p) => p.path === form.projectPath);
   const schemes = project?.schemes ?? (form.scheme ? [form.scheme] : []);
-  const canExplore = connected && !running && Boolean(form.projectPath && form.scheme && device && form.locales.length > 0);
+  const quota = state.quota.explore;
+  const sessionLeft = Math.max(0, quota.limit - quota.used);
+  const dailyLeft = Math.max(0, quota.dailyLimit - quota.dailyUsed);
+  const outOfQuota = sessionLeft === 0 || dailyLeft === 0;
+  const canExplore = connected && !running && !outOfQuota && Boolean(form.projectPath && form.scheme && device && form.locales.length > 0);
+  const now = useNow(outOfQuota && quota.resetAt !== undefined, 30_000);
+  let quotaText: string | null = null;
+  if (quota.dailyLimit === 0) quotaText = "Exploring is turned off on this server.";
+  else if (dailyLeft === 0) quotaText = `This server has used today's ${quota.dailyLimit} explorations (the public demo's model budget). It resets at midnight UTC.`;
+  else if (sessionLeft === 0)
+    quotaText = `You have used this session's ${quota.limit} explorations for the hour.${quota.resetAt ? ` The next one is free in ${Math.max(1, Math.ceil((quota.resetAt - now) / 60_000))} min.` : ""}`;
+  else if (quota.used > 0) quotaText = `${sessionLeft} of ${quota.limit} explorations left this hour.`;
 
   const explore = () => {
     if (!device) return;
@@ -128,6 +186,7 @@ export function ProjectPanel({
           </span>
         )}
       </header>
+      {device && isDuo(device) && <DuoFold device={device} call={call} connected={connected} />}
 
       <form
         className="space-y-3 px-4 py-3.5"
@@ -312,6 +371,9 @@ export function ProjectPanel({
             </button>
           )}
         </div>
+        {quotaText && !running && (
+          <p className={`text-[11px] leading-snug ${outOfQuota ? "text-amber-700 dark:text-amber-400" : "text-neutral-500"}`}>{quotaText}</p>
+        )}
       </form>
     </section>
   );

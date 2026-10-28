@@ -1,5 +1,7 @@
+import type { CaptionView, ComposeSettings, ComposeView, RenderView } from "../compose/state.ts";
+
 /**
- * Explore and replay jobs as the browser sees them. The server keeps a `JobsSnapshot` per session,
+ * Explore, replay and compose jobs as the browser sees them. The server keeps a `JobsSnapshot` per session,
  * sends it whole when a browser connects (`jobs`) and then sends each change as a `JobEvent`
  * (`job.event`). Both ends apply events with `applyJobEvent`, so they never drift apart.
  *
@@ -60,13 +62,34 @@ export interface ReplayParams {
   readonly locales: readonly string[];
 }
 
-export type JobAction = "explore" | "replay" | "cancel";
+/** Start (or restart) a compose job: captions for missing locales, theme, then every changed image. */
+export interface ComposeParams {
+  readonly settings?: Partial<ComposeSettings>;
+  /** Rewrite every caption that was not edited by hand (one Muse call). */
+  readonly regenerateCaptions?: boolean;
+}
+
+/** Save a caption typed in the gallery (empty text resets it), then re-render that image. */
+export interface CaptionParams {
+  readonly locale: string;
+  readonly screen: string;
+  readonly text: string;
+}
+
+/** Small renders of the first screen in every template (answered with { template: dataUrl }). */
+export interface PreviewParams {
+  readonly settings?: Partial<ComposeSettings>;
+  readonly locale?: string;
+}
+
+/** "preview" and "caption" answer right away; the others start or stop a job. */
+export type JobAction = "explore" | "replay" | "compose" | "caption" | "preview" | "cancel";
 
 // --- State ----------------------------------------------------------------------
 
-export type JobKind = "explore" | "replay";
+export type JobKind = "explore" | "replay" | "compose";
 export type JobStatus = "running" | "cancelling" | "done" | "failed" | "cancelled";
-export type JobPhase = "build" | "runner" | "install" | "explore" | "verify" | "judge" | "replay";
+export type JobPhase = "build" | "runner" | "install" | "explore" | "verify" | "judge" | "replay" | "captions" | "theme" | "render";
 
 export interface Usage {
   readonly input: number;
@@ -171,6 +194,8 @@ export interface RunView {
   readonly summary?: ExploreSummary;
   readonly judge?: JudgeView;
   readonly replays: readonly LocaleRun[];
+  /** Captions, theme and rendered screenshots, once the run has captures to compose. */
+  readonly compose?: ComposeView;
 }
 
 export interface JobView {
@@ -188,6 +213,8 @@ export interface JobView {
   readonly locales?: readonly string[];
   /** The agent's latest tap, in points, for a ripple in the live view. */
   readonly touch?: { readonly x: number; readonly y: number; readonly at: number };
+  /** Compose jobs: screenshots rendered (or already up to date) of the total. */
+  readonly progress?: { readonly done: number; readonly total: number };
 }
 
 export interface JobsSnapshot {
@@ -208,6 +235,10 @@ export type JobEvent =
   | { readonly type: "judge"; readonly judge: JudgeView }
   | { readonly type: "locale"; readonly run: LocaleRun }
   | { readonly type: "touch"; readonly x: number; readonly y: number; readonly at: number }
+  | { readonly type: "compose"; readonly compose: ComposeView }
+  | { readonly type: "render"; readonly set: string; readonly locale: string; readonly render: RenderView }
+  | { readonly type: "caption"; readonly locale: string; readonly screen: string; readonly caption: CaptionView }
+  | { readonly type: "progress"; readonly done: number; readonly total: number }
   | { readonly type: "cancelling" }
   | { readonly type: "ended"; readonly status: "done" | "failed" | "cancelled"; readonly error?: string; readonly at: number };
 
@@ -262,6 +293,25 @@ export function applyJobEvent(state: JobsSnapshot, event: JobEvent): JobsSnapsho
       });
     case "touch":
       return updateJob(state, (job) => ({ ...job, touch: { x: event.x, y: event.y, at: event.at } }));
+    case "compose":
+      return updateRun(state, (run) => ({ ...run, compose: event.compose }));
+    case "render":
+      return updateRun(state, (run) => {
+        const compose = run.compose;
+        const list = compose?.renders[event.set]?.[event.locale];
+        if (!compose || !list) return run;
+        const next = list.map((r) => (r.screen === event.render.screen ? event.render : r));
+        return { ...run, compose: { ...compose, renders: { ...compose.renders, [event.set]: { ...compose.renders[event.set], [event.locale]: next } } } };
+      });
+    case "caption":
+      return updateRun(state, (run) => {
+        const compose = run.compose;
+        if (!compose) return run;
+        const byLocale = { ...compose.captions.byLocale, [event.locale]: { ...compose.captions.byLocale[event.locale], [event.screen]: event.caption } };
+        return { ...run, compose: { ...compose, captions: { ...compose.captions, byLocale } } };
+      });
+    case "progress":
+      return updateJob(state, (job) => ({ ...job, progress: { done: event.done, total: event.total } }));
     case "cancelling":
       return updateJob(state, (job) => ({ ...job, status: "cancelling" }));
     case "ended":

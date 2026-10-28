@@ -2,7 +2,10 @@
 import { join, resolve } from "node:path";
 import type { AgentMethod, AgentResult, DeviceDriver, ScreenInfo, UISnapshot, XcodeProject } from "@shotwright/core";
 import type { AgentDriver, AgentLogger, DriverFactory } from "./drivers.ts";
+import { duoState } from "./duo.ts";
+import { findAppIcon } from "./icon.ts";
 import * as p from "./params.ts";
+import { Canvas, hsl } from "./png.ts";
 import { layoutHash } from "./runner/stable.ts";
 import { bootDevice, installApp, listDevices, shutdownDevice } from "./simctl.ts";
 import { DEFAULT_FPS, DEFAULT_MAX_WIDTH, Streamer, type FrameSink } from "./stream.ts";
@@ -25,6 +28,19 @@ export interface HandlerOptions {
 }
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/** A stand-in app icon for `--fake` projects: an indigo squircle with a white card, 1024 px. */
+function fakeIcon(): { png: string; width: number; height: number; file: string } {
+  const size = 1024;
+  const canvas = new Canvas(size, size);
+  for (let y = 0; y < size; y++) canvas.fillRow(y, hsl(235, 0.62, 0.56 - (0.14 * y) / size));
+  canvas.fillRoundRect(232, 300, 560, 424, 72, [255, 255, 255]);
+  canvas.fillRoundRect(300, 380, 240, 44, 22, hsl(235, 0.62, 0.5));
+  canvas.fillRoundRect(300, 470, 400, 36, 18, [214, 218, 240]);
+  canvas.fillRoundRect(300, 540, 330, 36, 18, [214, 218, 240]);
+  canvas.fillRing(724, 300, 0, 88, hsl(28, 0.9, 0.56));
+  return { png: canvas.toPng().toString("base64"), width: size, height: size, file: "FakeApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" };
+}
 
 /** `driver.waitForStable` for drivers without their own: polls `source()` until two snapshots match. */
 async function pollStable(driver: DeviceDriver, bundleId: string | undefined, timeoutMs: number): Promise<UISnapshot> {
@@ -49,6 +65,8 @@ export class Handlers {
   private readonly options: HandlerOptions;
   /** App launches in progress; the live view holds its captures meanwhile. */
   private launching = 0;
+  /** `--fake`: Duo simulators that have been "checked" once (the second check reports unfolded). */
+  private readonly fakeDuoChecks = new Set<string>();
   readonly streamer: Streamer;
   private readonly table: HandlerTable;
 
@@ -242,6 +260,29 @@ export class Handlers {
         if (typeof obj.text !== "string") throw new p.AgentError('"text" must be a string');
         await this.requireDriver().typeText(obj.text, obj.into === undefined ? undefined : p.selector(obj.into));
         return null;
+      },
+      "app.icon": async (params) => {
+        const projectPath = p.str(p.asObject(params), "projectPath");
+        if (!projectPath.startsWith("/")) throw new p.AgentError('"projectPath" must be an absolute path');
+        const icon = await findAppIcon(projectPath);
+        if (icon) {
+          log("info", `App icon: ${icon.file} (${icon.width}x${icon.height})`);
+          return icon;
+        }
+        // The --fake sample project does not exist on disk; give it an icon so theming can be tried.
+        if (this.options.fakeBuilds) return fakeIcon();
+        log("warn", "No PNG app icon (AppIcon.appiconset) found in the project; using the default theme");
+        return null;
+      },
+      "duo.state": async (params) => {
+        const udid = p.udid(params);
+        if (this.options.fakeBuilds) {
+          // Simulated: folded on the first check, unfolded after (as if the developer used Device Hub).
+          const unfolded = this.fakeDuoChecks.has(udid);
+          this.fakeDuoChecks.add(udid);
+          return { unfolded };
+        }
+        return duoState(udid);
       },
     };
   }

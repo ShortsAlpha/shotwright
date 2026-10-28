@@ -1,8 +1,10 @@
 "use client";
 
 import { artifactUrl, isActive, localeName, rankedScreens, type JobsSnapshot, type LocaleRun, type RunView } from "../../lib/jobs/state.ts";
+import type { SessionState } from "../../lib/ui-protocol.ts";
 import { AlertIcon, CheckIcon, GlobeIcon, PlayIcon, SparkleIcon, Spinner } from "../_components/icons.tsx";
 import { formatSeconds } from "./agent-panel.tsx";
+import { ComposePanel } from "./compose-panel.tsx";
 import type { JobFn } from "./use-session.ts";
 
 const card = "rounded-2xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900";
@@ -190,11 +192,13 @@ function Replay({ run, jobs, locales, job, onError }: { run: RunView; jobs: Jobs
 
 export function Results({
   jobs,
+  state,
   locales,
   job,
   onError,
 }: {
   jobs: JobsSnapshot;
+  state: SessionState;
   locales: readonly string[];
   job: JobFn;
   onError: (e: unknown) => void;
@@ -211,6 +215,7 @@ export function Results({
       </div>
       <Picks run={run} />
       {!exploring && <Replay run={run} jobs={jobs} locales={locales} job={job} onError={onError} />}
+      {!exploring && run.compose && run.compose.sets.length > 0 && <ComposePanel run={run} jobs={jobs} state={state} job={job} onError={onError} />}
     </div>
   );
 }

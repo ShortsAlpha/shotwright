@@ -46,7 +46,8 @@ export function SessionView() {
   const { status, state, logs, jobs, call, job, clearLogs } = session;
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useExploreForm();
-  const driving = isActive(jobs.job);
+  // Compose jobs render on the server; only explore and replay drive the simulator.
+  const driving = isActive(jobs.job) && jobs.job?.kind !== "compose";
   const requestedDevices = useRef(false);
 
   const onError = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), []);
@@ -128,7 +129,7 @@ export function SessionView() {
               <LogPanel logs={logs} onClear={clearLogs} className="flex-[3]" />
             </div>
           </main>
-          <Results jobs={jobs} locales={form.locales} job={job} onError={onError} />
+          <Results jobs={jobs} state={state} locales={form.locales} job={job} onError={onError} />
         </>
       ) : (
         <main className="flex flex-1 items-center justify-center text-sm text-neutral-500">Connecting to your session…</main>

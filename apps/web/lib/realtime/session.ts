@@ -6,6 +6,7 @@
 import type { WebSocket } from "ws";
 import type { AgentMethod, AgentParams, AgentResult, Hello, ScreenInfo, SimDevice } from "@shotwright/core";
 import { SessionJobs } from "../jobs/manager.ts";
+import { getQuotas } from "../limits.ts";
 import {
   BLOCKED_DURING_JOBS,
   UI_METHODS,
@@ -86,6 +87,7 @@ export class Session {
       startLiveView: () => this.startLiveView(),
       log: (level, message) => this.log("server", level, message),
       emit: (event) => this.broadcast({ type: "job.event", event }),
+      quotaChanged: () => this.pushState(),
     });
   }
 
@@ -106,6 +108,7 @@ export class Session {
       screen: this.screen,
       streaming: this.streaming,
       busy: [...this.busy.values()],
+      quota: { explore: getQuotas().view("explore", this.id), captions: getQuotas().view("captions", this.id) },
     };
   }
 
@@ -305,11 +308,15 @@ export class Session {
         let value: unknown = null;
         if (message.action === "explore") value = this.jobs.startExplore(message.params);
         else if (message.action === "replay") value = this.jobs.startReplay(message.params);
+        else if (message.action === "compose") value = await this.jobs.startCompose(message.params);
+        else if (message.action === "caption") value = await this.jobs.editCaption(message.params);
+        else if (message.action === "preview") value = await this.jobs.preview(message.params);
         else if (message.action === "cancel") value = this.jobs.cancel();
         else throw new Error(`Unknown job action: ${String(message.action)}`);
         reply({ ok: true, value });
       } catch (error) {
-        reply({ ok: false, error: { message: error instanceof Error ? error.message : String(error), code: "bad_request" } });
+        const code = (error as { code?: unknown }).code === "quota" ? "quota" : "bad_request";
+        reply({ ok: false, error: { message: error instanceof Error ? error.message : String(error), code } });
       }
       return;
     }
@@ -319,7 +326,7 @@ export class Session {
     }
     const method = message.method as UiMethod;
     const params = (message.params ?? {}) as AgentParams<UiMethod>;
-    if (this.jobs.active && BLOCKED_DURING_JOBS.has(method)) {
+    if (this.jobs.driving && BLOCKED_DURING_JOBS.has(method)) {
       reply({ ok: false, error: { message: "The agent is driving the simulator. Stop the job first.", code: "busy" } });
       return;
     }

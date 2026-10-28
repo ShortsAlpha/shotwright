@@ -4,6 +4,7 @@
  *   /ui         browsers (lib/ui-protocol.ts), authenticated by the session cookie
  *   /api/pair   POST { code } -> { sessionId } and sets the session cookie
  *   /api/artifacts/<runId>/<path>   GET a run file of the cookie's session (lib/jobs/artifacts.ts)
+ *   /api/runs/<runId>/zip           GET the run's screenshots as an upload-ready zip (lib/compose/compose.ts)
  * Everything else goes to Next.js, including its dev-mode HMR socket.
  *
  * Model keys (MUSE_API_KEY, BASETEN_API_KEY) come from the environment or the repo's .env.local.
@@ -12,14 +13,16 @@
  *   npm run dev                  # tsx server.ts, Next in dev mode, port 3000 (PORT to change)
  *   npm run build && npm start   # production
  */
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import next from "next";
 import { WebSocketServer } from "ws";
-import { artifactPath } from "./lib/jobs/artifacts.ts";
+import { exportZip } from "./lib/compose/compose.ts";
+import { closeRenderer } from "./lib/compose/renderer.ts";
+import { artifactPath, runDir } from "./lib/jobs/artifacts.ts";
 import { getHub } from "./lib/realtime/hub.ts";
 import { SESSION_COOKIE } from "./lib/ui-protocol.ts";
 
@@ -128,6 +131,51 @@ async function handleArtifact(req: IncomingMessage, res: ServerResponse, url: UR
   createReadStream(file).pipe(res);
 }
 
+/**
+ * GET /api/runs/<runId>/zip: the fastlane deliver layout plus README.txt as `<app>-screenshots.zip`.
+ * Screenshots that are stale (a caption changed since the last compose) are rendered first; no
+ * model is called here.
+ */
+async function handleZip(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  if (req.method !== "GET") {
+    json(res, 405, { error: "Use GET" }, { allow: "GET" });
+    return;
+  }
+  const sessionId = readCookie(req, SESSION_COOKIE) ?? "";
+  const runId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+  let dir: string;
+  try {
+    dir = runDir(sessionId, runId);
+  } catch {
+    json(res, 404, { error: "Not found" });
+    return;
+  }
+  if (!getHub().getSession(sessionId) || !existsSync(dir)) {
+    json(res, 404, { error: "Not found" });
+    return;
+  }
+  const aborted = new AbortController();
+  res.on("close", () => aborted.abort());
+  let zip;
+  try {
+    zip = await exportZip(dir, { signal: aborted.signal });
+  } catch (error) {
+    if (aborted.signal.aborted) return;
+    json(res, 409, { error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  const session = getHub().getSession(sessionId);
+  session?.log("server", "info", `Download: ${zip.name} (${zip.entries} files, ${(zip.bytes / 1e6).toFixed(1)} MB)`);
+  if (zip.rendered > 0) void session?.jobs.refreshCompose();
+  res.writeHead(200, {
+    "content-type": "application/zip",
+    "content-length": zip.bytes,
+    "content-disposition": `attachment; filename="${zip.name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(zip.name)}`,
+    "cache-control": "no-store",
+  });
+  createReadStream(zip.file).pipe(res);
+}
+
 /** Browsers send Origin on WebSocket handshakes; only accept our own site. */
 function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
@@ -156,6 +204,13 @@ async function main(): Promise<void> {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (path.startsWith("/api/artifacts/")) {
       handleArtifact(req, res, new URL(req.url ?? "/", "http://localhost")).catch((error: unknown) => {
+        console.error(error);
+        if (!res.headersSent) json(res, 500, { error: "Internal error" });
+      });
+      return;
+    }
+    if (/^\/api\/runs\/[^/]+\/zip$/.test(path)) {
+      handleZip(req, res, new URL(req.url ?? "/", "http://localhost")).catch((error: unknown) => {
         console.error(error);
         if (!res.headersSent) json(res, 500, { error: "Internal error" });
       });
@@ -198,7 +253,7 @@ async function main(): Promise<void> {
     hub.close();
     for (const ws of [...agentSockets.clients, ...uiSockets.clients]) ws.terminate();
     server.close();
-    void app.close().finally(() => process.exit(0));
+    void Promise.allSettled([app.close(), closeRenderer()]).finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
   process.on("SIGINT", shutdown);

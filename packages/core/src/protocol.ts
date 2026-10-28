@@ -62,6 +62,27 @@ export interface AgentMethods {
   "driver.tap": { params: TapTarget; result: null };
   "driver.swipe": { params: SwipeGesture; result: null };
   "driver.typeText": { params: { text: string; into?: ElementSelector }; result: null };
+  /**
+   * The app icon for theming: the largest PNG in an `AppIcon*.appiconset` under the project's
+   * folder (DerivedData, .build and node_modules are skipped); light-mode variants beat dark and
+   * tinted ones. `projectPath` is the .xcodeproj/.xcworkspace (its folder is searched) or a folder.
+   * Null when the project has no PNG app icon.
+   */
+  "app.icon": { params: { projectPath: string }; result: AppIcon | null };
+  /**
+   * iPhone Duo fold state: the inner display (`simctl io --display=3`) is black while folded.
+   * The developer unfolds it once per boot in Device Hub.
+   */
+  "duo.state": { params: { udid: string }; result: { unfolded: boolean } };
+}
+
+export interface AppIcon {
+  /** Base64 PNG. */
+  readonly png: string;
+  readonly width: number;
+  readonly height: number;
+  /** Where it was found on the Mac, relative to the searched folder. */
+  readonly file: string;
 }
 
 export type AgentMethod = keyof AgentMethods;
