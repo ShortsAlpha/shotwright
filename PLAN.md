@@ -66,8 +66,8 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | Date | Work |
 |---|---|
 | Oct 26–27 | ✅ Spikes ([simulator](docs/spikes/simulator.md), [Muse API](docs/spikes/muse-api.md)): locale, status bar, alpha, video, Duo displays, own XCUITest runner, first Muse call. Monorepo skeleton. Still open: manual Duo unfold handoff, Spark 1.3 vs Wonder. |
-| Oct 28 | Mac agent ↔ web over WebSocket, pairing code, live simulator view |
-| Oct 29 | Exploration agent → recorded flow (JSON) |
+| Oct 28 | ✅ Mac agent ↔ web over WebSocket, pairing code, live simulator view with click-to-tap (verified end to end on the real runner). ✅ Exploration agent → recorded flow → replay per locale, screen judge on Spark Open ([explorer spike](docs/spikes/explorer.md)). Spark 1.3 is the default explorer (~$0.05/run). |
+| Oct 29 | Step repair for label-only taps; flow schema extensions (selector `type`/`index`, coordinate-only taps, expected-screen record); explore from the site (progress + picks in the UI); Duo unfold handoff in the UI; tap latency (6.9 s after an app launch) |
 | Oct 30 | Replay across devices × locales, step repair |
 | Oct 31 | Renderer: templates, SVG frames, captions, text fitting, RTL, exact-size export |
 | Nov 1 | Localization (Spark Open), store metadata, demo mode on the site |
