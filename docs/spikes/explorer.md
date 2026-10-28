@@ -200,6 +200,8 @@ node packages/explorer/scripts/cli.ts explore --udid $U --bundle $B \
 # Replay per locale ({region} is replaced per locale: en->US, de->DE, ja->JP)
 node packages/explorer/scripts/cli.ts replay --udid $U --exploration $SP/runs/spark-c/exploration.json \
   --locales en,de,ja "--args=-seedSampleData -inMemoryStore -sampleRegion {region}" --out $SP/runs/spark-c/replay
+#   repair (since Oct 28 afternoon): --repair spark|open|none (default spark), --repair-max-cost 0.10,
+#   --repair-attempts 2, --flow <other flow.json with the same steps>
 
 node packages/explorer/scripts/cli.ts judge --exploration $SP/runs/spark-c/exploration.json
 node packages/explorer/scripts/cli.ts rebuild --exploration $SP/runs/spark-c/exploration.json
@@ -352,6 +354,8 @@ judge is free on Baseten.
    Coordinate fallbacks for label-only targets in other languages are the weak spot: "All",
    "Paused" and the Insights trial card hit the right element in de and ja, but only because the
    layout matched. Repair for those steps (PLAN, Oct 30) should target label-only steps first.
+   **Done:** structural selectors resolve them without a model, and repair covers the rest (see
+   "Step repair and structural selectors").
 5. **Navigation bars use the localized title as identifier** (`October 2026` / `Oktober 2026`).
    They are now excluded from anchors and from the identifier similarity check.
 6. **Paywall in front of the Add flow.** The sample data is above the free tier's limit, so "Add
@@ -363,24 +367,259 @@ judge is free on Baseten.
 7. **Near-duplicate picks.** Each run marked 2–3 detail screens with the same layout. The judge
    always ranks them last, so the final set should come from the judge (or the explore prompt
    could say "at most one detail screen").
-8. **The flow schema needed workarounds** (packages/core, not changed; see below).
+8. **The flow schema needed workarounds.** **Done:** `type`/`index`/`frame` selectors,
+   coordinate-only taps, `expect` and swipe `from` are in the schema now (see "Step repair and
+   structural selectors").
 9. **Disk full.** The Mac's data volume reached 100 % (583 MB free) during a replay, and one
    replay failed with `ENOSPC`. I deleted my own build intermediates (Renew DerivedData except
    `Build/Products`, the runner's index), leaving 1.5 GB free. The simulator device folder alone
    is 3.5 GB. Watch this before long replay batches.
 
-## Proposed changes to `packages/core/src/flow.ts` (not made; core is owned elsewhere)
+## Step repair and structural selectors (Oct 28, afternoon)
 
-- **`ElementSelector`: add optional `type` and `index`.** The runner already supports both.
-  Today a repeated identifier is disambiguated by adding the label (localized) or by the element
-  nearest the fallback point.
-- **`TapStep`: allow a coordinate-only target.** The schema requires an id or label. A `tap_at`
-  on an unlabelled area is recorded against the smallest labelled element under the point, or
-  left out of the flow with a warning.
-- **`ScreenshotStep`: optional `expect` (stable identifiers plus structure signature).** Then a
-  flow file alone can verify itself in other locales. Today this lives in `exploration.json`
-  (`screens`) and must be passed to `replayFlow`.
-- **`SwipeStep`: optional start point.** Swipes are always centred on the target or the screen.
+Simulator: "Shotwright iPhone 6.3" (iPhone 17 Pro, iOS 27.0, 402×874 pt). Renew: the same build
+as above, installed on this simulator. New Spark 1.3 run: `runs/spark-63`.
+
+### Summary
+
+| Question | Result |
+|---|---|
+| Do label-only taps resolve without a model in other languages? | **Yes.** With structural selectors, all 6 taps of the new flow resolved in en, de, ja, ar and tr: 3 by identifier, 3 by structure ("All", the Netflix row, the Insights trial card). 0 by label, 0 repairs, 0 fallbacks, $0. |
+| Does RTL work? | **Yes.** Arabic keeps the sibling order and mirrors the frames. Structural matching compares with the mirrored frame, so "All" → "الكل" (x 119 → 261 pt) resolved by structure. Arabic replay: 6/6 screens verified. |
+| Does repair work when selectors fail? | **Yes, 12 of 12.** Each repair needed 1 attempt: 8 label-only taps (legacy flow, de/ja/ar/tr), 2 taps in yesterday's 6.9" flow replayed on the 6.3", and 2 screen repairs after a deliberately wrong coordinate tap (en, ar). |
+| Repair cost and speed | **Spark 1.3: $0.0023–0.0045 per repair, 1.9–3.3 s.** Spark Open (Baseten): $0, 4.5–19 s, the same picks. |
+| Does the flow verify itself without `exploration.json`? | Yes. Screenshot steps now carry `expect` (identifiers that must be visible, title, type sequence). |
+| Old flows | All 8 flow files from yesterday parse with the new schema. spark-c, recorded on the 6.9", replays on the 6.3" in de and ar with 7/7 screens verified (one repair each). |
+| Meta API spend for this work | **$0.106** of $3: $0.068 for the exploration, $0.038 for 12 repairs. |
+
+### Flow schema changes (`packages/core/src/flow.ts`, backward compatible, still `version: 1`)
+
+- **`ElementSelector`** gets three optional fields:
+  - `type`: the element type, e.g. `"button"`;
+  - `index`: position among the parent's children of the same type, 0-based;
+  - `frame`: the element's normalized frame when recorded.
+
+  A selector now needs `id`, `label` **or** `type`. Note that `index` is **not** the runner's
+  `index` (the runner's means "n-th match of the whole query"), so drivers must ignore it.
+  The explorer strips `index` and `frame` before handing a selector to a driver
+  (`driverSelector`).
+- **`TapStep`**:
+  - `target` is optional;
+  - new `point` field: a coordinate-only tap is `{ action: "tap", point: {x, y} }`;
+  - one of `target` or `point` is required.
+- **`SwipeStep.from`**: optional normalized start point. The finger moves `distance` × the
+  target (or screen) size in `direction`.
+- **`ScreenshotStep.expect`**: `{ ids, title?, structure? }`.
+  - `ids` must all be visible: the `waitFor` anchor plus up to two of the developer's own
+    identifiers on views, not counting bar items, images or UIKit's PascalCase ids.
+  - `title` is the localized title when recorded. It gives the repair model context and is
+    not checked.
+  - `structure` is the element type sequence, compared by LCS with a threshold of 0.6.
+- New exports: `NormalizedRectSchema`, `ExpectedScreenSchema`, and the types `NormalizedRect`
+  and `ExpectedScreen`.
+
+### Recording (`explore.ts`, `actions.ts`, `recorder.ts`)
+
+- A tap on an element without a unique identifier records label + `type` + `index` + `frame`,
+  for example:
+
+  ```json
+  {"label":"All","type":"button","index":1,"frame":{"x":0.296,"y":0.381,"w":0.1095,"h":0.0503}}
+  ```
+
+  A repeated identifier (Renew's `calendar` is on both the tab button and its image) also gets
+  the structure.
+- Taps that could not be recorded before are now kept:
+  - an element with no label and no id is recorded by structure alone;
+  - a `tap_at` that hits nothing labelled is recorded as a coordinate-only tap.
+- A from/to swipe records `from`.
+- `FlatNode` has `siblingIndex` and `parent`. `Observation` has `viewIds`.
+- `FlowRecorder.build()` also returns `sources`: for each flow step, the observation it was
+  recorded on, taken from the edge (new `Edge.observation`).
+  - `explore()` saves it as `ExplorationResult.stepSources`.
+  - steps/NNN.jpg of that observation is the repair reference.
+
+### Resolution order in replay (`resolveTarget`)
+
+1. **Identifier.** Label, type and index break ties, e.g. `#calendar` + type `button` when the
+   label is "Kalender".
+2. **Structure:**
+   - same `type`, same `index` among its siblings;
+   - the frame overlaps the recorded one, or its centre is within 15 % of the screen (layouts
+     drift: Arabic text pushed "All" down 12 pt);
+   - right-to-left languages also try the mirrored frame;
+   - when the recorded label's leading name ("Netflix" in "Netflix, $15.49, …") is visible on
+     *another* element, the rows have moved, and the name wins over the position.
+3. **Label:** exact label, then the leading segment.
+4. **Not found:**
+   - with `repair`: a model repair (below);
+   - without `repair`: the recorded point.
+
+   Recorded points and coordinate-only taps are mirrored for right-to-left languages, and so
+   are horizontal swipes (direction and `from`).
+
+### Repair (`repair.ts`; `replayFlow(..., { repair })`, off unless passed)
+
+**When it runs:**
+- a tap whose target resolves to nothing (after the usual scroll-into-view);
+- a screenshot step that fails its checks: anchor, `expect.ids`, structure, the exploration's
+  identifier similarity. A missing `waitFor` anchor right before a screenshot is logged as
+  `miss`, and the screenshot step repairs it.
+
+**What the model gets:**
+- the explorer's observation of the current screen (402-px JPEG + element list);
+- the recorded step: type, label, id, index, and position on the 0–1000 grid;
+- the replay locale, and whether the layout is mirrored;
+- what should be true afterwards: the next `waitFor` anchor, the next screenshot, or the next
+  step's target;
+- when available, the screenshot the step was recorded on, with the target outlined in red
+  (`outlineTarget`; example: `repair-reference-all.jpg` in the scratchpad).
+
+**Tools:** `tap(element_id)`, `tap_at(x, y)`, `swipe(direction)`, `give_up(reason)`.
+
+**After each action** the replayer checks the expected outcome:
+- the next `waitFor` anchor appears (3 s);
+- or the next screenshot's checks pass;
+- or the next step's target can be found and the screen changed;
+- otherwise, at least the screen changed.
+
+**Limits:**
+- 2 model calls per step (`maxAttemptsPerStep`);
+- $0.10 per replay (`maxCostUsd`).
+
+**When repair fails:**
+- If the model never acted (it gave up, or the budget ran out), the tap falls back to the
+  recorded point (`via: "fallback"`).
+- If it acted and failed, the step fails.
+
+**Models:**
+- `provider: "spark"` (default): Muse Spark 1.3, effort low, prompt cache key
+  `shotwright-repair-v1`;
+- `"open"`: Spark Open on Baseten, free;
+- or any `ExplorerProvider`.
+
+**Results:**
+- `ReplayStepResult.via`: `id` | `structure` | `label` | `repair` | `fallback` | `point`, plus
+  `repair`;
+- `ReplayResult.repairs` and `repairCostUsd`. Each `RepairRecord` has the step, kind (`tap` or
+  `screen`), the attempts (action, element, reason, tokens, ms, cost), `chosen` (the selector
+  that worked in this locale) and `note`.
+- `ReplayShot.repaired`;
+- `ReplayCheck.missingIds`.
+
+**Launch:** if `driver.launch` throws but the app turns out to be in the foreground, the launch
+step passes. Otherwise it relaunches once.
+
+**CLI:**
+
+```
+replay ... --repair spark|open|none --repair-max-cost 0.10 --repair-attempts 2 [--flow other-flow.json]
+```
+
+- Reference images come from `stepSources` + `steps/NNN.jpg`.
+- The log ends with a matrix row per locale.
+
+### Replay matrix: new flow (`runs/spark-63`, 6 screens, 21 steps, 6 taps), repair on (Spark 1.3)
+
+| Locale | id | structure | label | repair | fallback | failed | Screens verified | Time | Repair cost |
+|---|---|---|---|---|---|---|---|---|---|
+| en | 3 | 3 | 0 | 0 | 0 | 0 | 6/6 | 108 s* | $0 |
+| de | 3 | 3 | 0 | 0 | 0 | 0 | 6/6 | 61 s | $0 |
+| ja | 3 | 3 | 0 | 0 | 0 | 0 | 6/6 | 61 s | $0 |
+| ar (RTL) | 3 | 3 | 0 | 0 | 0 | 0 | 6/6 | 51 s | $0 |
+| tr | 3 | 3 | 0 | 0 | 0 | 0 | 6/6 | 82 s* | $0 |
+
+\* Includes a slow relaunch: in en the layout did not settle for 30 s, and tr had a 33 s
+launch. The other launches took 11–14 s.
+
+Structural matches, as resolved:
+
+| Recorded | de | ja | ar | tr |
+|---|---|---|---|---|
+| "All" (segment) | Alle | すべて | الكل (mirrored) | Tümü |
+| Netflix row | Netflix, 13,99 €… | Netflix, ¥2,490… | Netflix, ‏٥٨٫٩٩ ⃁… | Netflix, ₺229,99… |
+| "Disney+ trial ends in 2 days, …" card | "Disney+: Probeabo endet…" | "Disney+の無料トライアル…" | "تنتهي الفترة التجريبية في Disney+…" | "Disney+: deneme 2 gün…" |
+
+The trial card shows why the leading-name rule only applies when the name is visible elsewhere.
+Its first segment is localized ("Disney+ trial ends in 2 days" → "Disney+: Probeabo endet in
+2 Tagen"), so a strict "same leading name" rule would have sent it to repair.
+
+Contact sheet: `sheet-structural-locales.jpg`. All 30 screens are right, and the Arabic row is
+mirrored.
+
+### Repair matrix: the same flow without structure (legacy label-only selectors, `flow-legacy.json`)
+
+| Locale | id | label | repair (attempts) | failed | Screens | Spark 1.3 cost | Spark Open cost (list) |
+|---|---|---|---|---|---|---|---|
+| en | 3 | 3 | 0 | 0 | 6/6 | $0 | not run |
+| de | 3 | 1 | 2 (1 + 1) | 0 | 6/6 | $0.0088 | $0 ($0.0075) |
+| ja | 3 | 1 | 2 (1 + 1) | 0 | 6/6 | $0.0057 | $0 ($0.0061) |
+| ar | 3 | 1 | 2 (1 + 1) | 0 | 6/6 | $0.0063 | $0 ($0.0074) |
+| tr | 3 | 1 | 2 (1 + 1) | 0 | 6/6 | $0.0062 | $0 ($0.0062) |
+
+- The Netflix row resolved by label (its leading segment).
+- "All" and the trial card were repaired. Both models picked the same elements in every locale:
+  Alle / すべて / الكل / Tümü, and the localized trial card.
+- Per repair call: about 2.9 k input tokens (two screenshots + element list, 37–42 % cached
+  after the first call) and 130–430 output tokens.
+- Latency: Spark 1.3 1.9–3.1 s; Spark Open median 5.2 s, worst 19 s.
+
+Sheets: `sheet-repair-spark-locales.jpg`, `sheet-repair-open-locales.jpg`.
+
+### Screen repair and cross-device
+
+- **Screen repair** (`flow-broken.json`). The Calendar tab tap was replaced with a wrong
+  coordinate-only tap at (0.5, 0.62). In en and ar:
+  - the `waitFor` missed, after its 10 s timeout;
+  - the screenshot step repaired it in 1 attempt: the model tapped Calendar / التقويم,
+    $0.0026 / $0.0029;
+  - all following steps resolved as usual: 6/6. Sheet: `sheet-screen-repair.jpg`.
+- **Yesterday's spark-c flow (6.9", label-only, no `stepSources`) on the 6.3"**, de and ar:
+  - 7/7 verified;
+  - "All" repaired without a reference image ($0.0023 / $0.0031);
+  - the Netflix and Disney+ rows matched by label.
+
+### Costs
+
+| Item | Model | Cost |
+|---|---|---|
+| Exploration `spark-63` (27 turns, 20 actions, 241 s, including verification) | Spark 1.3 | $0.068 |
+| 8 repairs, legacy flow | Spark 1.3 | $0.027 |
+| 2 screen repairs + 2 repairs on spark-c | Spark 1.3 | $0.011 |
+| **Meta Model API total** | | **$0.106** (budget $3) |
+| 8 repairs, legacy flow | Spark Open | $0 (24 k in, 2 k out; list $0.027) |
+| Judge for `spark-63` | Spark Open | $0 (list $0.026) |
+
+Expected cost in production:
+- flows recorded with structure: $0 per locale for Renew;
+- label-only flows: about $0.003 per broken step per locale;
+- the $0.10 cap allows about 25 repairs per replay.
+
+### What still fails or is weak
+
+1. **Slow launches.**
+   - A launch can take 30–55 s: `/source` timed out after 30 s once, and once the layout did
+     not settle within 30 s.
+   - Replay now tolerates a launch that threw while the app came up, but the time is lost.
+   - The runner (packages/agent) should give the first `/source` after a launch more time, or
+     find out what Renew animates on Home.
+2. **A structural false positive is not caught at the tap.** If the target is gone and another
+   element with the same type and index sits within 15 % of the screen, replay taps it. The
+   screenshot checks and screen repair catch this later, but only at the next screenshot.
+3. **Lazy lists.** `index` counts loaded siblings, and rows are usually index 0 in their own
+   cell, so for list rows "structure" means "same position on screen". Reordered rows fall back
+   to the leading name; a reordered row whose name is localized would pick the wrong row.
+4. **Two attempts.** A screen repair that needs more than two actions fails (wrong tab +
+   scrolled away + a segment). Each test today needed one.
+5. **A missing anchor costs its full `waitFor` timeout (10 s)** before the screenshot step
+   repairs.
+6. **Repairs are not written back.** `RepairRecord.chosen` has the working selector per locale;
+   patching the flow (or a per-locale overlay) is a follow-up.
+7. **`expect.ids` on other device classes.** "Must be visible" can fail when a smaller or
+   different layout pushes an id off screen. That spends a repair, then fails verification.
+   Not tested on iPad yet.
+8. **Mirroring assumes the app mirrors.** Coordinate-only taps on content that does not mirror
+   (charts, images) land on the wrong side in Arabic and rely on screen repair.
 
 ## Runner module API (for the WebSocket agent)
 
@@ -431,8 +670,11 @@ const result = await explore({ driver, provider: createProvider("spark", { reaso
 // result: flow, screens, ranked, notes, usage, costUsd, timing, steps, graph, verification
 
 const replay = await replayFlow(driver, result.flow, { locale: { language: "de" },
-  launchArgs: ["-seedSampleData", "-inMemoryStore", "-sampleRegion", "DE"], screens: result.screens });
-// replay.screenshots[i]: { name, png, verified, checks }
+  launchArgs: ["-seedSampleData", "-inMemoryStore", "-sampleRegion", "DE"], screens: result.screens,
+  // optional model repair; referenceImage(i) = <outDir>/steps/<result.stepSources[i]>.jpg
+  repair: { provider: "spark", maxCostUsd: 0.1, maxAttemptsPerStep: 2, referenceImage } });
+// replay.screenshots[i]: { name, png, verified, checks, repaired? }
+// replay.steps[i].via: id | structure | label | repair | fallback | point; replay.repairs, replay.repairCostUsd
 
 const judged = await judgeScreens({ screens: [{ name, png, why }], appName: "Renew" });
 ```
@@ -444,8 +686,15 @@ const judged = await judgeScreens({ screens: [{ name, png, why }], appName: "Ren
   `exec.ts`.
 - `packages/explorer/`:
   - `src/explore.ts`, `observe.ts`, `actions.ts` (selectors and step executors shared by
-    exploration and replay), `tools.ts`, `recorder.ts`, `replay.ts`, `judge.ts`, `json.ts`
+    exploration and replay), `tools.ts`, `recorder.ts`, `replay.ts`, `repair.ts`, `judge.ts`, `json.ts`
   - `src/providers/` (`muse-responses.ts`, `chat.ts`, `pricing.ts`, `types.ts`)
   - `scripts/cli.ts`
 - Scratchpad (not committed): `runs/{spark-v1,spark,spark-b,spark-c,wonder,open,open-json,smoke-open}/`,
   `sheet-picks.jpg`, `sheet-locales.jpg`, `probe/` (API probes, hang test, token measurement).
+- Scratchpad, Oct 28 afternoon:
+  - `runs/spark-63/`: the exploration, plus `flow-legacy.json`, `flow-broken.json`, and
+    `replay/`, `replay-legacy-spark/`, `replay-legacy-open/`, `replay-broken/`;
+  - `runs/spark-c/replay-63-repair/`;
+  - `sheet-structural-locales.jpg`, `sheet-repair-spark-locales.jpg`,
+    `sheet-repair-open-locales.jpg`, `sheet-screen-repair.jpg`, `repair-reference-all.jpg`;
+  - `probe2/`: tree dumps, resolver test, sheet and strip scripts.

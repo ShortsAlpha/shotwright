@@ -13,15 +13,16 @@ export { ChatProvider, BASETEN_BASE_URL, SPARK_OPEN_MODEL, basetenClient } from 
  * endpoint; "open" (Muse Spark Open on Baseten, native tools) and "open-json" (same model,
  * JSON actions in text).
  */
-export function createProvider(name: string, options: { reasoningEffort?: ReasoningEffort } = {}): ExplorerProvider {
+export function createProvider(name: string, options: { reasoningEffort?: ReasoningEffort; promptCacheKey?: string } = {}): ExplorerProvider {
   const effort = options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {};
+  const cache = options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {};
   switch (name) {
     case "spark":
     case MODELS.spark:
-      return new MuseResponsesProvider({ model: MODELS.spark, ...effort });
+      return new MuseResponsesProvider({ model: MODELS.spark, ...effort, ...cache });
     case "wonder":
     case MODELS.wonder:
-      return new MuseResponsesProvider({ model: MODELS.wonder, ...effort });
+      return new MuseResponsesProvider({ model: MODELS.wonder, ...effort, ...cache });
     case "open":
     case SPARK_OPEN_MODEL:
       return new ChatProvider({ model: SPARK_OPEN_MODEL, mode: "tools", ...effort });

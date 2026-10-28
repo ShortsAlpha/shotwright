@@ -7,7 +7,7 @@
  * fresh launch when that is shorter. Before each screenshot a `waitFor` on an identifier that
  * only the target screen has makes the flow verify itself on replay.
  */
-import { FlowSchema, type Flow, type FlowStep, type LaunchStep, type SwipeStep, type TapStep, type TypeTextStep } from "@shotwright/core";
+import { FlowSchema, type ExpectedScreen, type Flow, type FlowStep, type LaunchStep, type SwipeStep, type TapStep, type TypeTextStep } from "@shotwright/core";
 import type { Observation } from "./observe.ts";
 
 type ActionStep = TapStep | SwipeStep | TypeTextStep;
@@ -16,6 +16,8 @@ export interface StateInfo {
   readonly fingerprint: string;
   readonly identifiers: readonly string[];
   readonly anchorIds: readonly string[];
+  /** The developer's own identifiers on views (not images, not UIKit's): the best "must be present" ids. */
+  readonly viewIds?: readonly string[];
   readonly structure: readonly string[];
   readonly lines: readonly string[];
   readonly title: string | undefined;
@@ -53,6 +55,8 @@ export interface Edge {
   readonly to: string;
   readonly step: ActionStep | "launch";
   readonly cost: number;
+  /** The observation the action was taken on (its screenshot is the repair reference). */
+  readonly observation?: number;
 }
 
 const START = "START";
@@ -61,7 +65,8 @@ const LAUNCH_COST = 4;
 function stepCost(step: ActionStep): number {
   switch (step.action) {
     case "tap":
-      return step.target.id ? 1 : 1.3; // label-only taps break in other locales more often
+      // Label and structure-only taps break in other locales more often; bare coordinates most.
+      return !step.target ? 1.6 : step.target.id ? 1 : step.target.label ? 1.3 : 1.5;
     case "swipe":
       return 1.1;
     case "typeText":
@@ -84,7 +89,7 @@ function lineSimilarity(a: readonly string[], b: readonly string[]): number {
 /** What happened, in order: the literal trajectory, used when a shortcut through the graph fails. */
 export type TrajectoryEvent =
   | { readonly kind: "launch"; readonly state: string }
-  | { readonly kind: "action"; readonly from: string; readonly step: ActionStep; readonly to: string }
+  | { readonly kind: "action"; readonly from: string; readonly step: ActionStep; readonly to: string; readonly observation?: number }
   | { readonly kind: "mark"; readonly name: string; readonly state: string };
 
 export interface RecorderGraph {
@@ -133,6 +138,7 @@ export class FlowRecorder {
       fingerprint: observation.fingerprint,
       identifiers: observation.identifiers,
       anchorIds: observation.anchorIds,
+      viewIds: observation.viewIds,
       structure: observation.structure,
       lines: observation.lines,
       title: observation.title,
@@ -148,10 +154,11 @@ export class FlowRecorder {
     }
   }
 
-  recordTransition(from: string, step: ActionStep, to: string): void {
+  recordTransition(from: string, step: ActionStep, to: string, observation?: number): void {
     if (from === to) return;
-    this.edges.push({ from, to, step, cost: stepCost(step) });
-    this.events.push({ kind: "action", from, step, to });
+    const at = observation !== undefined ? { observation } : {};
+    this.edges.push({ from, to, step, cost: stepCost(step), ...at });
+    this.events.push({ kind: "action", from, step, to, ...at });
   }
 
   /** Returns the existing mark when this exact state is already marked (under another name). */
@@ -238,7 +245,7 @@ export class FlowRecorder {
         edges.length = seen + 1;
       } else {
         states.push(event.to);
-        edges.push({ from: event.from, to: event.to, step: event.step, cost: stepCost(event.step) });
+        edges.push({ from: event.from, to: event.to, step: event.step, cost: stepCost(event.step), ...(event.observation !== undefined ? { observation: event.observation } : {}) });
       }
     }
     return { cost: edges.reduce((sum, e) => sum + e.cost, 0), edges };
@@ -254,8 +261,22 @@ export class FlowRecorder {
     return fresh.find((id) => !atLaunch.has(id)) ?? fresh[0];
   }
 
-  build(name: string, launch: LaunchStep, options: BuildOptions = {}): { flow: Flow; screens: ScreenRecord[]; warnings: string[] } {
+  /** What the screen must show: the anchor plus up to two more of the developer's view ids, the title and the type sequence. */
+  #expect(state: string, anchor: string | undefined): ExpectedScreen | undefined {
+    const info = this.states.get(state);
+    if (!info) return undefined;
+    const ids = [...new Set([...(anchor ? [anchor] : []), ...(info.viewIds ?? [])])].slice(0, 3);
+    return { ids, ...(info.title ? { title: info.title } : {}), structure: [...info.structure] };
+  }
+
+  /**
+   * The flow, the screen records, and for each flow step the observation it was recorded on
+   * (`sources`, aligned with flow.steps; null for launches): the exploration saved those as
+   * steps/NNN.jpg, and replay shows them to the model when it repairs a step.
+   */
+  build(name: string, launch: LaunchStep, options: BuildOptions = {}): { flow: Flow; screens: ScreenRecord[]; warnings: string[]; sources: Array<number | null> } {
     const steps: FlowStep[] = [launch];
+    const sources: Array<number | null> = [null];
     const screens: ScreenRecord[] = [];
     const warnings: string[] = [];
     const rep = this.clusters();
@@ -282,16 +303,23 @@ export class FlowRecorder {
         if (edge.step === "launch") {
           viaRelaunch = true;
           steps.push(launch);
+          sources.push(null);
         } else {
           steps.push(edge.step);
+          sources.push(edge.observation ?? this.states.get(edge.from)?.observationIndex ?? null);
         }
       }
       const before = path.edges.at(-1)?.from;
       // Right after the first launch there is no previous screen: any stable identifier proves the app is up.
       const anchor =
         path.edges.length > 0 ? this.#anchor(mark.state, before) : screens.length === 0 ? this.states.get(mark.state)?.anchorIds[0] : undefined;
-      if (anchor) steps.push({ action: "waitFor", target: { id: anchor }, timeoutMs: 10_000 });
-      steps.push({ action: "screenshot", name: mark.name });
+      if (anchor) {
+        steps.push({ action: "waitFor", target: { id: anchor }, timeoutMs: 10_000 });
+        sources.push(mark.observationIndex);
+      }
+      const expect = this.#expect(mark.state, anchor);
+      steps.push({ action: "screenshot", name: mark.name, ...(expect ? { expect } : {}) });
+      sources.push(mark.observationIndex);
       const info = this.states.get(mark.state);
       screens.push({
         name: mark.name,
@@ -309,6 +337,6 @@ export class FlowRecorder {
       });
       current = mark.state;
     }
-    return { flow: FlowSchema.parse({ version: 1, name, steps }), screens, warnings };
+    return { flow: FlowSchema.parse({ version: 1, name, steps }), screens, warnings, sources };
   }
 }

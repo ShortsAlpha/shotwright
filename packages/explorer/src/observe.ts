@@ -23,6 +23,10 @@ export interface FlatNode {
   readonly enabled: boolean;
   readonly selected: boolean;
   readonly depth: number;
+  /** Position among the parent's children of the same type, 0-based (structural selectors). */
+  readonly siblingIndex: number;
+  /** Index of the parent in the flattened list; -1 for the root. */
+  readonly parent: number;
   /** Nearest navigationBar / tabBar / toolbar / alert / sheet ancestor. */
   readonly container?: string;
   readonly inKeyboard: boolean;
@@ -51,6 +55,8 @@ export interface Observation {
   readonly identifiers: readonly string[];
   /** The same identifiers, best `waitFor` anchors first (views and controls before SF Symbol images). */
   readonly anchorIds: readonly string[];
+  /** The developer's own identifiers on views and controls (not images, not UIKit's PascalCase ones). */
+  readonly viewIds: readonly string[];
   readonly title: string | undefined;
   readonly keyboard: boolean;
   readonly foreground: boolean;
@@ -76,8 +82,9 @@ export function isInteractive(type: string): boolean {
 /** Flattens the snapshot tree, depth-first, keeping container context. */
 export function flatten(tree: UINode): FlatNode[] {
   const out: FlatNode[] = [];
-  const walk = (node: UINode, depth: number, container: string | undefined, inKeyboard: boolean) => {
+  const walk = (node: UINode, depth: number, container: string | undefined, inKeyboard: boolean, parent: number, siblingIndex: number) => {
     const keyboard = inKeyboard || node.type === "keyboard";
+    const self = out.length;
     out.push({
       type: node.type,
       ...(node.identifier ? { identifier: node.identifier } : {}),
@@ -88,13 +95,20 @@ export function flatten(tree: UINode): FlatNode[] {
       enabled: node.enabled,
       selected: node.selected ?? false,
       depth,
+      siblingIndex,
+      parent,
       ...(container ? { container } : {}),
       inKeyboard: keyboard,
     });
     const next = CONTAINERS.has(node.type) ? node.type : container;
-    for (const child of node.children ?? []) walk(child, depth + 1, next, keyboard);
+    const seen = new Map<string, number>();
+    for (const child of node.children ?? []) {
+      const i = seen.get(child.type) ?? 0;
+      seen.set(child.type, i + 1);
+      walk(child, depth + 1, next, keyboard, self, i);
+    }
   };
-  walk(tree, 0, undefined, false);
+  walk(tree, 0, undefined, false, -1, 0);
   return out;
 }
 
@@ -259,6 +273,8 @@ export async function buildObservation(snapshot: UISnapshot, png: Uint8Array, op
   // then system ones (UIKit's PascalCase "BackButton", "Toolbar"), then SF Symbol names on images.
   const onView = (id: string) => nodes.some((n) => n.identifier === id && n.type !== "image");
   const system = (id: string) => /^[A-Z]/.test(id);
+  const inBar = (id: string) => nodes.some((n) => n.identifier === id && n.container !== undefined && ["tabBar", "navigationBar", "toolbar"].includes(n.container));
+  const viewIds = identifiers.filter((id) => onView(id) && !system(id) && !inBar(id));
   const anchorIds = [
     ...identifiers.filter((id) => onView(id) && !system(id)),
     ...identifiers.filter((id) => onView(id) && system(id)),
@@ -279,6 +295,7 @@ export async function buildObservation(snapshot: UISnapshot, png: Uint8Array, op
     structure: elements.map((e) => e.type),
     identifiers,
     anchorIds,
+    viewIds,
     title,
     keyboard,
     foreground,

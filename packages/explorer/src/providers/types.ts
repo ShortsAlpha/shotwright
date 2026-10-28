@@ -22,7 +22,13 @@ export interface ToolCall {
 }
 
 export type HistoryItem =
-  | { readonly kind: "user"; readonly text: string; readonly observation?: ObservationPayload }
+  | {
+      readonly kind: "user";
+      readonly text: string;
+      readonly observation?: ObservationPayload;
+      /** Extra images sent before the observation's (e.g. a reference screenshot); always sent in full. */
+      readonly images?: readonly Uint8Array[];
+    }
   | { readonly kind: "assistant"; readonly text: string; readonly calls: readonly ToolCall[] }
   | {
       readonly kind: "results";

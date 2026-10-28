@@ -103,8 +103,9 @@ export class ChatProvider implements ExplorerProvider {
   }
 }
 
-function userContent(text: string, image?: Uint8Array): ChatContentPart[] {
+function userContent(text: string, image?: Uint8Array, extra: readonly Uint8Array[] = []): ChatContentPart[] {
   const parts: ChatContentPart[] = [{ type: "text", text }];
+  for (const e of extra) parts.push({ type: "image_url", image_url: { url: dataUrl(e) } });
   if (image) parts.push({ type: "image_url", image_url: { url: dataUrl(image) } });
   return parts;
 }
@@ -116,7 +117,8 @@ function renderTools(request: TurnRequest): ChatMessage[] {
     const full = index === latest;
     switch (item.kind) {
       case "user":
-        if (item.observation && full) messages.push({ role: "user", content: userContent(`${item.text}\n\n${item.observation.text}`, item.observation.image) });
+        if (item.observation && full) messages.push({ role: "user", content: userContent(`${item.text}\n\n${item.observation.text}`, item.observation.image, item.images) });
+        else if (item.images?.length) messages.push({ role: "user", content: userContent(item.observation ? `${item.text}\n\n${item.observation.summary}` : item.text, undefined, item.images) });
         else messages.push({ role: "user", content: item.observation ? `${item.text}\n\n${item.observation.summary}` : item.text });
         break;
       case "assistant":
@@ -159,12 +161,12 @@ function renderJson(request: TurnRequest): ChatMessage[] {
   request.history.forEach((item, index) => {
     const full = index === latest;
     switch (item.kind) {
-      case "user":
-        messages.push({
-          role: "user",
-          content: item.observation && full ? userContent(`${item.text}\n\n${item.observation.text}`, item.observation.image) : item.observation ? `${item.text}\n\n${item.observation.summary}` : item.text,
-        });
+      case "user": {
+        const text = item.observation ? `${item.text}\n\n${full ? item.observation.text : item.observation.summary}` : item.text;
+        const image = item.observation && full ? item.observation.image : undefined;
+        messages.push({ role: "user", content: image || item.images?.length ? userContent(text, image, item.images) : text });
         break;
+      }
       case "assistant":
         messages.push({
           role: "assistant",

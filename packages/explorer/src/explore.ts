@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DeviceDriver, Flow, LaunchStep, ScreenInfo, SwipeStep, TapStep, TypeTextStep } from "@shotwright/core";
 import { nodeAt, normalize, performSwipe, performTap, performType, selectorFor, swipeStepFromPoints, tapStepForNode } from "./actions.ts";
-import { fromGrid, observe, type Observation, type ObservedElement } from "./observe.ts";
+import { center, fromGrid, observe, type Observation, type ObservedElement } from "./observe.ts";
 import { addUsage, emptyUsage, type ExplorerProvider, type HistoryItem, type ObservationPayload, type ToolCall, type Usage } from "./providers/types.ts";
 import { FlowRecorder, type RecorderGraph, type ScreenRecord } from "./recorder.ts";
 import { replayFlow, type ReplayCheck } from "./replay.ts";
@@ -59,6 +59,11 @@ export interface ExplorationResult {
   readonly screen: ScreenInfo;
   readonly flow: Flow;
   readonly screens: ScreenRecord[];
+  /**
+   * For each flow step, the observation it was recorded on (steps/NNN.jpg in outDir), or null
+   * (launches). Replay repair shows these screenshots to the model.
+   */
+  readonly stepSources?: Array<number | null>;
   /** Marked screen names, best first (the model's ranking from `done`, else by score). */
   readonly ranked: string[];
   readonly notes: string;
@@ -275,15 +280,11 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
           case "tap": {
             const el = byRef(input.elementId);
             if (!el) return `Error: no element ${input.elementId} in the latest observation (refs e1-e${obs.elements.length}).`;
-            let step = tapStepForNode(el, obs.nodes, screen);
+            // Identifier when it has one; otherwise label plus structure (type, index among siblings, frame).
+            const step = tapStepForNode(el, obs.nodes, screen);
             if (!step) {
-              const holder = nodeAt(obs.nodes, { x: el.frame.x + el.frame.w / 2, y: el.frame.y + el.frame.h / 2 });
-              const target = holder ? selectorFor(holder, obs.nodes) : undefined;
-              if (target) step = { action: "tap", target, fallback: normalize({ x: el.frame.x + el.frame.w / 2, y: el.frame.y + el.frame.h / 2 }, screen) };
-            }
-            if (!step) {
-              await driver.tap({ x: el.frame.x + el.frame.w / 2, y: el.frame.y + el.frame.h / 2 });
-              warnings.push(`turn ${turn}: tapped ${describe(el)}, which has no identifier or label; not recordable`);
+              await driver.tap(center(el.frame));
+              warnings.push(`turn ${turn}: tapped ${describe(el)}, which could not be recorded`);
               return `Tapped ${describe(el)}.`;
             }
             acted = { step };
@@ -293,13 +294,9 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
           case "tap_at": {
             const point = fromGrid({ x: input.x, y: input.y }, screen);
             const node = nodeAt(obs.nodes, point);
-            const target = node ? selectorFor(node, obs.nodes) : undefined;
-            if (!target) {
-              await driver.tap(point);
-              warnings.push(`turn ${turn}: tap_at(${input.x},${input.y}) hit no labelled element; not recordable`);
-              return `Tapped at (${input.x},${input.y}).`;
-            }
-            const step: TapStep = { action: "tap", target, fallback: normalize(point, screen) };
+            const target = node ? selectorFor(node, obs.nodes, screen) : undefined;
+            // Nothing labelled under the point: record the coordinates alone.
+            const step: TapStep = target ? { action: "tap", target, fallback: normalize(point, screen) } : { action: "tap", point: normalize(point, screen) };
             acted = { step };
             await performTap(driver, step, obs.nodes, screen);
             return `Tapped at (${input.x},${input.y})${node?.label ? ` on "${node.label.slice(0, 40)}"` : ""}.`;
@@ -310,7 +307,7 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
               step = swipeStepFromPoints(fromGrid(input.from, screen), fromGrid(input.to, screen), obs.nodes, screen);
             } else {
               const el = input.elementId ? byRef(input.elementId) : undefined;
-              const within = el ? selectorFor(el, obs.nodes) : undefined;
+              const within = el ? selectorFor(el, obs.nodes, screen) : undefined;
               step = { action: "swipe", direction: input.direction ?? "up", distance: input.distance ?? 0.5, ...(within ? { target: within } : {}) };
             }
             acted = { step };
@@ -320,10 +317,10 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
           case "type_text": {
             const el = input.elementId ? byRef(input.elementId) : undefined;
             if (input.elementId && !el) return `Error: no element ${input.elementId} in the latest observation.`;
-            const into = el ? selectorFor(el, obs.nodes) : undefined;
+            const into = el ? selectorFor(el, obs.nodes, screen) : undefined;
             const step: TypeTextStep = { action: "typeText", text: input.text, ...(into ? { target: into } : {}) };
             acted = { step };
-            await performType(driver, step);
+            await performType(driver, step, obs.nodes, screen);
             return `Typed "${input.text}".`;
           }
           case "relaunch":
@@ -341,7 +338,7 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
         recorder.noteState(obs);
         const performed = acted as { step?: TapStep | SwipeStep | TypeTextStep; relaunch?: boolean };
         if (performed.relaunch) recorder.recordLaunch(obs.fingerprint);
-        else if (performed.step) recorder.recordTransition(before.fingerprint, performed.step, obs.fingerprint);
+        else if (performed.step) recorder.recordTransition(before.fingerprint, performed.step, obs.fingerprint, before.index);
         const changed = obs.fingerprint !== before.fingerprint;
         const actionCall = reply.calls.find((c) => ACTIONS.has(c.name) && !(outputs.get(c.id) ?? "").startsWith("Not executed"));
         if (actionCall) outputs.set(actionCall.id, `${outputs.get(actionCall.id)} ${changed ? "The screen changed." : "The screen did not change."}`);
@@ -417,6 +414,7 @@ export async function explore(options: ExploreOptions): Promise<ExplorationResul
     screen,
     flow: built.flow,
     screens: built.screens,
+    stepSources: built.sources,
     ...(verification ? { verification } : {}),
     ranked: finalRanking,
     notes,

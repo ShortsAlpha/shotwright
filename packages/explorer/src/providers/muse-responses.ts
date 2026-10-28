@@ -14,6 +14,8 @@ export interface MuseResponsesOptions {
   readonly maxOutputTokens?: number;
   readonly parallelToolCalls?: boolean;
   readonly id?: string;
+  /** Default "shotwright-explore-v1". */
+  readonly promptCacheKey?: string;
 }
 
 export class MuseResponsesProvider implements ExplorerProvider {
@@ -24,6 +26,7 @@ export class MuseResponsesProvider implements ExplorerProvider {
   readonly #effort: ReasoningEffort | undefined;
   readonly #maxOutputTokens: number;
   readonly #parallel: boolean;
+  readonly #cacheKey: string;
 
   constructor(options: MuseResponsesOptions) {
     this.model = options.model;
@@ -32,6 +35,7 @@ export class MuseResponsesProvider implements ExplorerProvider {
     this.#effort = options.reasoningEffort;
     this.#maxOutputTokens = options.maxOutputTokens ?? 6_000;
     this.#parallel = options.parallelToolCalls ?? true;
+    this.#cacheKey = options.promptCacheKey ?? "shotwright-explore-v1";
   }
 
   async next(request: TurnRequest): Promise<ProviderTurn> {
@@ -45,7 +49,7 @@ export class MuseResponsesProvider implements ExplorerProvider {
       parallel_tool_calls: this.#parallel,
       store: false,
       max_output_tokens: this.#maxOutputTokens,
-      prompt_cache_key: "shotwright-explore-v1",
+      prompt_cache_key: this.#cacheKey,
       ...(this.#effort ? { reasoning: { effort: this.#effort } } : {}),
       input,
     });
@@ -87,6 +91,7 @@ function render(request: TurnRequest): ResponseInputItem[] {
         let text = item.text;
         if (item.observation) text += `\n\n${full ? item.observation.text : item.observation.summary}`;
         content.push({ type: "input_text", text });
+        for (const extra of item.images ?? []) content.push({ type: "input_image", image_url: dataUrl(extra) });
         if (item.observation && full) content.push({ type: "input_image", image_url: dataUrl(item.observation.image) });
         items.push({ role: "user", content });
         break;
