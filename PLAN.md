@@ -20,7 +20,7 @@ Browser ──► Web app (Next.js, hosted) ──► Meta Model API / Baseten
             Mac agent (TypeScript CLI) ──► xcodebuild, simctl, UI driver
 ```
 
-- **Web app**: projects, templates, rendering, Muse calls (keys stay server-side), App Store Connect upload.
+- **Web app**: projects, templates, rendering, Muse calls (keys stay server-side), zip export. Deployed as one long-lived Node process on Railway (Vercel's WebSocket beta pins each connection to one instance, so the agent and the browser could land on different ones).
 - **Mac agent**: hands and eyes only — build, boot, install, launch, tap, screenshot, record. Decisions come from the server.
 - **Input**: the developer's own Xcode project on their Mac (source never uploaded). Optional App Store URL to prefill name, icon, colors and locales via the iTunes Lookup API.
 - **Demo data contract**: the app reads a `-ShotwrightDemo` launch argument and loads demo content; optional test account for login walls.
@@ -34,7 +34,7 @@ Browser ──► Web app (Next.js, hosted) ──► Meta Model API / Baseten
 5. **Compose**: captions, our own SVG device frames, backgrounds; text fitting, RTL, CJK fonts. Export at exact pixel sizes.
 6. **Video**: `simctl io recordVideo` during replay → cut 15–30 s previews and 5–30 s header/search loops; SAM 3.1 drives zooms and highlights.
 7. **Validate**: sizes, no alpha, video specs, guideline checks (2.3.3, 2.3.4, 2.3.14).
-8. **Upload** via the App Store Connect API (or export a fastlane `deliver` folder).
+8. **Export** one upload-ready zip in the fastlane `deliver` layout (`screenshots/<locale>/<n>_<set>_<screen>.png`, previews alongside): drag into App Store Connect or run `fastlane deliver`. Direct upload through the App Store Connect API is post-hackathon.
 
 ## Meta models
 
@@ -71,8 +71,8 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | Oct 30 | Replay across devices × locales, step repair |
 | Oct 31 | Renderer: templates, SVG frames, captions, text fitting, RTL, exact-size export |
 | Nov 1 | Localization (Spark Open), store metadata, demo mode on the site |
-| Nov 2 | Preview + header/search videos, SAM 3.1 zooms, Muse Image backgrounds, validator |
-| Nov 3 | App Store Connect upload, deploy, **feature freeze**, full rehearsal |
+| Nov 2 | Preview + header/search videos, SAM 3.1 zooms, Muse Image backgrounds, validator. If time permits: narrated previews per locale (Spark Open writes, ElevenLabs reads) |
+| Nov 3 | Railway deploy, zip export polish, **feature freeze**, full rehearsal |
 | Nov 4 | 3-minute demo video, README, submit |
 
 ## Demo video (3 min)
@@ -83,8 +83,10 @@ Budget: $150 Meta credit. Estimated $3–6 per full app run; replays cost ~$0.
 | 0:20 | Connect the Mac; the agent explores the app live and explains its picks |
 | 1:10 | Replay across devices and locales (time-lapse), Duo outer and inner sets |
 | 1:50 | Output: screenshots, preview, header/search video; edit a caption, re-render |
-| 2:30 | One-click upload to App Store Connect |
+| 2:30 | Download the zip, drop it into App Store Connect |
 | 2:50 | What was built during the hackathon, which Meta models do what |
+
+Narration: script written by us, voiced with ElevenLabs.
 
 ## Hackathon rules checklist
 
